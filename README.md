@@ -34,6 +34,21 @@ swift test           # 36 headless tests against Tests/Fixtures
 swift run askmail    # menu-bar app (needs local Ollama for real queries)
 ```
 
+`swift run askmail` launches a bare executable with no Info.plist and no
+icon, so anything macOS registers for it (notably Full Disk Access in System
+Settings) shows a blank icon. For day-to-day use, package it as a real app
+bundle instead:
+
+```sh
+Packaging/build-app.sh   # builds a release binary, wraps it as .build/AskMail.app
+open .build/AskMail.app  # or drag it to /Applications
+```
+
+The bundled app has its own icon and identity (`com.askmail.app`), separate
+from the raw binary. If you already granted Full Disk Access to the raw
+`askmail` binary, remove that (icon-less) entry from Privacy & Security >
+Full Disk Access and re-grant it to `AskMail.app` once you launch the bundle.
+
 Runtime dependencies (not needed for tests): [Ollama](https://ollama.com)
 with `nomic-embed-text` pulled for embeddings and a local chat model
 (`qwen2.5:7b` default). Cloud providers are optional; keys go in the macOS
