@@ -71,13 +71,13 @@ final class MailAccountsTests: XCTestCase {
 
         let accounts = MailAccountsReader.list(mailRoot: root, accountsDatabase: database)
 
-        XCTAssertEqual(accounts.map(\.id), [uuidA, uuidB], "sorted by label: Personal < Work")
+        XCTAssertEqual(accounts.map(\.id), [uuidA, uuidB], "sorted by label: alice < bob")
         XCTAssertFalse(accounts.contains { $0.id == "MailData" }, "MailData is not an account")
 
         let personal = try XCTUnwrap(accounts.first { $0.id == uuidA })
         XCTAssertEqual(personal.email, "alice@example.com")
         XCTAssertEqual(personal.displayName, "Personal")
-        XCTAssertEqual(personal.label, "Personal (alice@example.com)")
+        XCTAssertEqual(personal.label, "alice@example.com", "email alone is the label, not the name")
         XCTAssertEqual(personal.storageKey, "alice@example.com")
         // resolvingSymlinksInPath: enumeration canonicalises /var -> /private/var.
         XCTAssertEqual(personal.directory.resolvingSymlinksInPath(),

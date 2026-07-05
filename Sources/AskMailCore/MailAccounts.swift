@@ -26,15 +26,14 @@ public struct MailAccount: Sendable, Identifiable, Equatable {
         self.directory = directory
     }
 
-    /// Human-friendly label for the settings picker. Degrades progressively so
-    /// an account is always selectable even when the plist can't be read.
+    /// Human-friendly label for the settings picker: the email address alone
+    /// when known (the actual identifying detail a user recognizes), falling
+    /// back to the account name, then the raw directory id so an account is
+    /// always selectable even when neither is available.
     public var label: String {
-        switch (displayName.isEmpty, email.isEmpty) {
-        case (false, false): return "\(displayName) (\(email))"
-        case (false, true):  return displayName
-        case (true, false):  return email
-        case (true, true):   return id
-        }
+        if !email.isEmpty { return email }
+        if !displayName.isEmpty { return displayName }
+        return id
     }
 
     /// Value written to each message's `account` column: the email when known
