@@ -1,0 +1,79 @@
+import Foundation
+
+/// Single source of truth for concrete starting values, mirroring docs/defaults.md.
+/// Everything here is a starting point to validate during the B11 spikes.
+public enum Defaults {
+    // MARK: Models
+    public static let embeddingModel = "nomic-embed-text"
+    public static let localChatModel = "qwen2.5:7b"
+    public static let cloudChatModel = "qwen3.5:cloud"
+    public static let mistralChatModel = "mistral-large-latest"
+    public static let ollamaLocalHost = URL(string: "http://localhost:11434")!
+    public static let ollamaCloudHost = URL(string: "https://ollama.com")!
+
+    // MARK: Retrieval (quality-critical, tune during spike B11 #3)
+    /// ~512 tokens at the ~4 chars/token approximation used throughout.
+    public static let chunkChars = 2048
+    /// ~64 tokens overlap.
+    public static let overlapChars = 256
+    public static let vectorTopN = 30
+    public static let keywordTopN = 30
+    public static let rrfK = 60.0
+    public static let finalTopK = 8
+    /// Relevance floor on the fused score; below this the no-match message is
+    /// returned instead of forcing a weak answer. Tune empirically (B11 #3).
+    public static let relevanceFloor = 0.0
+
+    // MARK: Generation
+    public static let contextTokenLimit = 4096
+    public static let answerTokenLimit = 800
+    public static let temperature = 0.2
+    public static let sessionTurnCap = 3
+
+    // MARK: Ingestion
+    public static let envelopeIndexPath =
+        NSString(string: "~/Library/Mail/V10/MailData/Envelope Index").expandingTildeInPath
+    /// Add to envelope-index date_sent/date_received for Unix time.
+    public static let cocoaEpochOffset: Int64 = 978_307_200
+    public static let embedBatchSize = 128
+    public static let maxAttachmentBytes = 25 * 1024 * 1024
+
+    // MARK: Logging
+    public static let logRetentionHours: Double = 12
+
+    // MARK: Keychain
+    public static let keychainServiceOllamaCloud = "askmail.ollama-cloud"
+    public static let keychainServiceMistral = "askmail.mistral"
+    public static let keychainAccount = "api-key"
+
+    // MARK: UI copy (English-only in v1 per A8)
+    public static let noMatchMessage =
+        "No matching emails found. Try different terms or a wider date range."
+    public static let sourcesListLabel = "Sources"
+
+    /// Default system prompt per docs/prompt-contract.md §1. User-editable at
+    /// runtime (FR-9); this is the shipped default.
+    public static let defaultSystemPrompt = """
+    You are an assistant that answers questions about the user's own email.
+
+    Rules:
+    1. Answer ONLY from the CONTEXT provided below. The context is a set of
+       excerpts retrieved from the user's mailbox. Do not use outside knowledge.
+    2. If the answer is not in the context, say so plainly (in the user's
+       language) and do not guess. Suggest what the user might search for
+       instead. Never fabricate senders, dates, amounts, or quotes.
+    3. Answer in the SAME LANGUAGE as the QUESTION, regardless of the language
+       of the emails.
+    4. Be concise and direct. Lead with the answer. Do not restate the question.
+    5. Every factual claim, figure, date, or quote must be traceable to a
+       specific source. Immediately after each such claim, cite the source by
+       its number in square brackets, e.g. [1] or [2]. The app renders these
+       as superscript numbers linked to the source. Place the citation right
+       after the claim it supports, not bunched at the end. Cite the minimum
+       sources needed per claim.
+    6. When the context contains conflicting information (e.g. a plan changed
+       across emails), surface the most recent and note the change, citing both.
+    7. Do not output source numbers as prose (never write "source 1 says").
+       Only use them inside the bracketed citation markers.
+    """
+}

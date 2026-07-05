@@ -1,0 +1,23 @@
+366
+From: Acme Events <events@acme.example>
+To: Max <max@example.com>
+Subject: Pricing webinar rescheduled
+Date: Mon, 02 Mar 2026 09:14:00 +0100
+Message-ID: <fixture-0001@acme.example>
+Content-Type: text/plain; charset=utf-8
+
+Hi all,
+
+The pricing webinar originally set for March 12 has been moved to
+April 9 at 15:00 CET. The Zoom link is unchanged.
+
+Best,
+Acme Events
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+	<key>flags</key><integer>8623</integer>
+	<key>date-received</key><integer>1740000000</integer>
+</dict>
+</plist>

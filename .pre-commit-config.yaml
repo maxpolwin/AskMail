@@ -1,0 +1,27 @@
+# Pre-commit hooks. Install: pipx install pre-commit && pre-commit install
+# Pin revs to exact tags; refresh deliberately, not automatically.
+repos:
+  - repo: https://github.com/gitleaks/gitleaks
+    rev: v8.21.2   # verify latest stable at install time, then pin
+    hooks:
+      - id: gitleaks
+
+  # Socket dependency risk scanning.
+  # Socket's pre-commit integration and CLI evolve; confirm the current
+  # recommended hook id / CLI invocation at setup and pin it here.
+  - repo: local
+    hooks:
+      - id: socket-scan
+        name: socket dependency scan
+        entry: socket scan create --pre-commit
+        language: system
+        pass_filenames: false
+
+  - repo: https://github.com/pre-commit/pre-commit-hooks
+    rev: v5.0.0
+    hooks:
+      - id: check-added-large-files
+        args: ["--maxkb=2048"]
+      - id: detect-private-key
+      - id: end-of-file-fixer
+      - id: trailing-whitespace

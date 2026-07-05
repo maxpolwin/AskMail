@@ -1,0 +1,37 @@
+# macOS
+.DS_Store
+*.swp
+
+# Xcode / SwiftPM
+build/
+DerivedData/
+.build/
+*.xcuserstate
+*.xcworkspace/xcuserdata/
+xcuserdata/
+Package.resolved
+
+# App runtime artifacts (never commit user data)
+*.sqlite
+*.sqlite-wal
+*.sqlite-shm
+askmail.db*
+Logs/
+*.log
+
+# Local model / embedding artifacts
+*.gguf
+*.bin
+
+# Secrets (belt and braces; keys live in Keychain, never in files)
+.env
+.env.*
+!.env.example
+*.pem
+*.p8
+*.p12
+*.mobileprovision
+secrets/
+
+# Eval outputs
+Tests/Evals/results/

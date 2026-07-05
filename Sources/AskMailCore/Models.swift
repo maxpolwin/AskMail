@@ -1,0 +1,92 @@
+import Foundation
+
+/// Where a chunk's text came from within its email.
+public enum ChunkSource: String, Sendable, Codable {
+    case body
+    case pdf
+}
+
+/// A PDF attachment as decoded from MIME, before text extraction.
+public struct PdfAttachment: Sendable {
+    public var filename: String
+    public var data: Data
+
+    public init(filename: String, data: Data) {
+        self.filename = filename
+        self.data = data
+    }
+}
+
+/// The result of parsing one .emlx file.
+public struct ParsedEmail: Sendable {
+    /// Message-ID header value without the surrounding angle brackets.
+    public var messageID: String
+    public var subject: String
+    public var sender: String
+    public var recipient: String
+    /// From the RFC 5322 Date header. The envelope-index date path is separate.
+    public var date: Date?
+    /// Body text after HTML-to-text conversion and boilerplate stripping.
+    public var bodyText: String
+    public var pdfAttachments: [PdfAttachment]
+    /// Attachments skipped (e.g. over the size cap), for logging.
+    public var skippedAttachments: [String]
+
+    public var dateUnix: Int64 { Int64(date?.timeIntervalSince1970 ?? 0) }
+}
+
+/// A retrieval-ready chunk with the email metadata needed for prompt assembly
+/// and citation rendering.
+public struct ContextChunk: Sendable, Equatable {
+    public var chunkID: Int64
+    public var messageID: String
+    public var subject: String
+    public var sender: String
+    public var dateUnix: Int64
+    public var source: ChunkSource
+    public var text: String
+
+    public init(chunkID: Int64, messageID: String, subject: String, sender: String,
+                dateUnix: Int64, source: ChunkSource, text: String) {
+        self.chunkID = chunkID
+        self.messageID = messageID
+        self.subject = subject
+        self.sender = sender
+        self.dateUnix = dateUnix
+        self.source = source
+        self.text = text
+    }
+}
+
+/// One numbered source email, the value side of the `N -> message_id` map.
+public struct SourceRef: Sendable, Equatable {
+    public var messageID: String
+    public var subject: String
+    public var sender: String
+    public var dateUnix: Int64
+
+    public init(messageID: String, subject: String, sender: String, dateUnix: Int64) {
+        self.messageID = messageID
+        self.subject = subject
+        self.sender = sender
+        self.dateUnix = dateUnix
+    }
+}
+
+/// One completed Q&A pair in the ephemeral in-memory session buffer.
+public struct SessionTurn: Sendable, Equatable {
+    public var question: String
+    public var answer: String
+
+    public init(question: String, answer: String) {
+        self.question = question
+        self.answer = answer
+    }
+}
+
+/// Crude token estimate used for context budgeting: ~4 characters per token.
+public enum TokenEstimator {
+    public static func tokens(_ text: String) -> Int {
+        (text.count + 3) / 4
+    }
+}
