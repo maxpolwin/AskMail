@@ -40,7 +40,9 @@ strings in a document.
 |---|---|---|
 | Envelope index path | `~/Library/Mail/V10/MailData/Envelope Index` | READ-ONLY. |
 | Cocoa epoch offset | +978307200 | add to date_sent/date_received for Unix time. |
-| Embed batch size | 128 | tune to memory pressure. |
+| Embed batch size | 16 | small on purpose: 128 × 8k-ctx OOM-killed the local daemon mid-run. |
+| Embed num_ctx | 4096 | sized to ~512-token chunks; oversizing spikes memory. |
+| Unreachable abort | 3 consecutive conn. failures | stop the run (don't fail every remaining message) if Ollama dies. |
 | Attachment types (v1) | PDF only | |
 | Max attachment size | 25 MB | skip larger; log skip. |
 | Scheduled run gate | AC power only | manual trigger ignores; off-power runs are skipped, not queued. |

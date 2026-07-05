@@ -177,8 +177,9 @@ public struct OllamaEmbedder: EmbeddingProvider {
         request.httpBody = try JSONSerialization.data(withJSONObject: [
             "model": model,
             "input": texts,
-            // Use the model's full context window (docs/defaults.md).
-            "options": ["num_ctx": 8192],
+            // Size the context to our chunk length; oversizing spikes memory
+            // and can OOM the daemon (docs/defaults.md).
+            "options": ["num_ctx": Defaults.embedNumCtx],
         ] as [String: Any])
 
         // Retry transport errors and 5xx (transient), but not 4xx (won't fix by

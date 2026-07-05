@@ -80,7 +80,15 @@ public enum Defaults {
     }
     /// Add to envelope-index date_sent/date_received for Unix time.
     public static let cocoaEpochOffset: Int64 = 978_307_200
-    public static let embedBatchSize = 128
+    /// Chunks embedded per Ollama request. Kept small: 128 × an 8k context per
+    /// item spiked memory and OOM-killed the local daemon mid-run (observed as
+    /// a cascade of -1004 "could not connect" failures). 16 keeps peak memory
+    /// modest without meaningfully slowing throughput.
+    public static let embedBatchSize = 16
+    /// Context window requested per embed. Our chunks are ~512 tokens
+    /// (`chunkChars` ≈ 2048 chars), so 4096 is ample headroom; the old 8192
+    /// just multiplied the KV-cache allocation with no quality benefit.
+    public static let embedNumCtx = 4096
     public static let maxAttachmentBytes = 25 * 1024 * 1024
 
     // MARK: Logging

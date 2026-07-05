@@ -1,5 +1,18 @@
 import Foundation
 
+public enum IngestError: Error, CustomStringConvertible {
+    /// The embedding backend (local Ollama) became unreachable, so the run was
+    /// stopped rather than logging a failure for every remaining message.
+    case embedderUnreachable
+
+    public var description: String {
+        switch self {
+        case .embedderUnreachable:
+            return "embedding backend unreachable (is Ollama running at localhost:11434?)"
+        }
+    }
+}
+
 public struct IngestProgress: Sendable {
     public var processed: Int
     public var total: Int
@@ -78,17 +91,25 @@ public final class MailboxIngestor {
         return IngestSummary(ingested: ingested, failed: failed, newWatermark: newWatermark)
     }
 
+    /// Consecutive embed-connection failures that mean the backend is down (not
+    /// a one-off), after which the run aborts instead of failing every remaining
+    /// message. Small so a dead Ollama is reported within seconds.
+    static let unreachableAbortThreshold = 3
+
     /// Incremental ingest (FR-5): processes only files new or changed since the
     /// last run, skipping any whose fingerprint the store already recorded.
     /// Each processed file's fingerprint is committed as it succeeds, so a crash
     /// mid-run resumes from where it stopped rather than restarting. Individual
-    /// file failures are logged and skipped, never aborting the run.
+    /// file failures are logged and skipped; but if the embedding backend goes
+    /// unreachable, the run aborts with `IngestError.embedderUnreachable` rather
+    /// than logging a failure for all remaining messages.
     @discardableResult
     public func ingestNew(_ files: [EmlxFile],
                           progress: (@Sendable (IngestProgress) -> Void)? = nil) async throws -> IngestSummary {
         var ingested = 0
         var failed = 0
         var skipped = 0
+        var consecutiveUnreachable = 0
         var maxDate: Int64 = (try? store.watermark()) ?? 0
 
         for (index, file) in files.enumerated() {
@@ -103,10 +124,20 @@ public final class MailboxIngestor {
                 try await ingest(email: email)
                 try store.recordIngested(sourceID: file.sourceID, fingerprint: file.fingerprint)
                 ingested += 1
+                consecutiveUnreachable = 0
                 maxDate = max(maxDate, email.dateUnix)
             } catch {
                 failed += 1
                 log("ingest FAILED file=\(file.url.lastPathComponent) error=\(error)")
+                if Self.isConnectionError(error) {
+                    consecutiveUnreachable += 1
+                    if consecutiveUnreachable >= Self.unreachableAbortThreshold {
+                        log("ingest aborted after \(consecutiveUnreachable) consecutive connection failures; \(ingested) done this run")
+                        throw IngestError.embedderUnreachable
+                    }
+                } else {
+                    consecutiveUnreachable = 0
+                }
             }
             progress?(IngestProgress(processed: index + 1, total: files.count))
         }
@@ -118,6 +149,21 @@ public final class MailboxIngestor {
         }
         log("ingest done (incremental): \(ingested) new, \(skipped) unchanged, \(failed) failed")
         return IngestSummary(ingested: ingested, failed: failed, skipped: skipped, newWatermark: newWatermark)
+    }
+
+    /// Whether an error means the embedding backend is unreachable (daemon down,
+    /// connection refused/lost) as opposed to a per-message problem. Matches the
+    /// observed -1004 "could not connect" cascade.
+    static func isConnectionError(_ error: Error) -> Bool {
+        guard let urlError = error as? URLError else { return false }
+        switch urlError.code {
+        case .cannotConnectToHost, .cannotFindHost, .dnsLookupFailed,
+             .networkConnectionLost, .notConnectedToInternet, .timedOut,
+             .resourceUnavailable:
+            return true
+        default:
+            return false
+        }
     }
 
     public func ingest(email: ParsedEmail) async throws {

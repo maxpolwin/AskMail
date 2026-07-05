@@ -77,6 +77,12 @@ final class Vectorizer: ObservableObject {
                 "\(trigger.rawValue) vectorize done: \(summary.ingested) new, "
                 + "\(summary.skipped) unchanged, \(summary.failed) failed")
             return summary
+        } catch is IngestError {
+            // Backend went unreachable mid-run; already-done work is saved and
+            // the rest retries next run. Give a specific, actionable message.
+            RollingLog.shared.log("\(trigger.rawValue) vectorize stopped: Ollama unreachable")
+            status = "Stopped: Ollama isn\u{2019}t running. Start it (\u{2018}ollama serve\u{2019}), then Vectorize now \u{2014} it resumes where it left off."
+            return nil
         } catch {
             RollingLog.shared.log("\(trigger.rawValue) vectorize failed: \(error)")
             status = "Vectorization failed: \(error)"

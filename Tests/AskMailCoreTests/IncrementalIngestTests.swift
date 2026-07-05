@@ -58,6 +58,30 @@ final class IncrementalIngestTests: XCTestCase {
         XCTAssertEqual(try store.chunkCount(), chunksBefore, "idempotent replace, no dupes")
     }
 
+    func testAbortsEarlyWhenEmbedderUnreachable() async throws {
+        let store = try SQLiteStore.inMemory()
+        let embedder = UnreachableEmbedder()
+        let ingestor = MailboxIngestor(store: store, embedder: embedder,
+                                       account: "test", log: { _ in })
+
+        // 10 files, but the backend refuses every connection: the run must abort
+        // after the threshold rather than trying all 10.
+        let many = (1...10).map { id in
+            EmlxFile(sourceID: Int64(id),
+                     url: Self.fixturesDirectory.appendingPathComponent("msg-0001-plain.emlx"),
+                     fingerprint: "v\(id)")
+        }
+        do {
+            _ = try await ingestor.ingestNew(many)
+            XCTFail("expected the run to abort")
+        } catch let error as IngestError {
+            guard case .embedderUnreachable = error else { return XCTFail("wrong error") }
+        }
+        XCTAssertEqual(embedder.calls, MailboxIngestor.unreachableAbortThreshold,
+                       "aborts at the threshold, not after every file")
+        XCTAssertEqual(try store.messageCount(), 0, "nothing embedded while the backend is down")
+    }
+
     func testFingerprintRoundTripsAndDeleteAllClearsIt() async throws {
         let store = try SQLiteStore.inMemory()
         XCTAssertNil(try store.ingestedFingerprint(sourceID: 42))
@@ -72,6 +96,16 @@ final class IncrementalIngestTests: XCTestCase {
         try store.deleteAll()
         XCTAssertNil(try store.ingestedFingerprint(sourceID: 42),
                      "delete & rebuild resets ingest state so the next run rebuilds")
+    }
+}
+
+/// Simulates a down Ollama: every embed refuses the connection, like the
+/// observed -1004 cascade.
+final class UnreachableEmbedder: EmbeddingProvider, @unchecked Sendable {
+    private(set) var calls = 0
+    func embed(_ texts: [String]) async throws -> [[Float]] {
+        calls += 1
+        throw URLError(.cannotConnectToHost)
     }
 }
 
