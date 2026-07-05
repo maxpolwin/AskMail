@@ -31,6 +31,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     }
 
     private func setUpStatusItem() {
+        // macOS 26 (Tahoe) auto-adds system icons to standard menu items
+        // (Settings, Quit, ...). Opt this app's menus out; this is a
+        // per-app equivalent of `defaults write -g NSMenuEnableActionImages NO`.
+        UserDefaults.standard.register(defaults: ["NSMenuEnableActionImages": false])
+
         let item = NSStatusBar.system.statusItem(withLength: NSStatusItem.squareLength)
         item.button?.image = Self.hairlineStatusIcon()
         item.button?.setAccessibilityLabel("AskMail")
