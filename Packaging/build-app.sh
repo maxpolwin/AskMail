@@ -23,12 +23,27 @@ cp "$BIN_PATH/askmail" "$APP/Contents/MacOS/askmail"
 cp Packaging/Info.plist "$APP/Contents/Info.plist"
 cp Packaging/AppIcon.icns "$APP/Contents/Resources/AppIcon.icns"
 
-codesign --force --deep --sign - "$APP"
+# Prefer a stable self-signed identity so the Full Disk Access grant survives
+# rebuilds (ad-hoc signing changes the cdhash each build and breaks it). Falls
+# back to ad-hoc if the identity isn't installed. See Packaging/setup-signing.sh.
+IDENTITY="AskMail Dev Signing"
+if security find-certificate -c "$IDENTITY" >/dev/null 2>&1; then
+  codesign --force --deep --sign "$IDENTITY" "$APP"
+  echo "Signed $APP with the stable '$IDENTITY' identity."
+  STABLE=1
+else
+  codesign --force --deep --sign - "$APP"
+  echo "Ad-hoc signed $APP. Run Packaging/setup-signing.sh once for a stable"
+  echo "identity so the Full Disk Access grant survives future rebuilds."
+  STABLE=0
+fi
 
+echo
 echo "Built $APP"
 echo
-echo "If you previously ran the raw 'askmail' binary, remove its entry from"
-echo "System Settings > Privacy & Security > Full Disk Access (it has no"
-echo "icon) — it's a different identity from this bundle and won't be reused."
-echo "Then open $APP (or drag it to /Applications) and re-grant Full Disk"
-echo "Access when prompted; it will show the AskMail icon this time."
+echo "If you previously granted Full Disk Access to an older build (the raw"
+echo "'askmail' binary or an ad-hoc bundle), remove that stale entry in System"
+echo "Settings > Privacy & Security > Full Disk Access, then add $APP and enable it."
+if [ "$STABLE" = 1 ]; then
+  echo "With the stable identity, that grant will now persist across rebuilds."
+fi
