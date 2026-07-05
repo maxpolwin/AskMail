@@ -1,8 +1,10 @@
+import SQLite3
 import XCTest
 @testable import AskMailCore
 
 /// Account discovery over a synthetic ~/Library/Mail/V10 tree: directory
-/// enumeration is the source of truth, Accounts.plist supplies friendly labels.
+/// enumeration is the source of truth, the Internet Accounts database
+/// (ZACCOUNT table) supplies friendly labels.
 final class MailAccountsTests: XCTestCase {
     private let uuidA = "AAAAAAAA-1111-2222-3333-444444444444"
     private let uuidB = "BBBBBBBB-1111-2222-3333-444444444444"
@@ -26,27 +28,48 @@ final class MailAccountsTests: XCTestCase {
             withIntermediateDirectories: true)
     }
 
-    private func writeAccountsPlist(_ accounts: [[String: Any]]) throws -> URL {
-        let mailData = root.appendingPathComponent("MailData", isDirectory: true)
-        try FileManager.default.createDirectory(at: mailData, withIntermediateDirectories: true)
-        let url = mailData.appendingPathComponent("Accounts.plist")
-        let data = try PropertyListSerialization.data(
-            fromPropertyList: ["MailAccounts": accounts], format: .xml, options: 0)
-        try data.write(to: url)
+    /// Builds a synthetic Accounts4.sqlite with just the columns AskMail reads,
+    /// mirroring the real ZACCOUNT schema observed on a live macOS 15 install.
+    private func writeAccountsDatabase(_ rows: [(id: String, description: String?, username: String?)]) throws -> URL {
+        let url = root.appendingPathComponent("Accounts4.sqlite")
+        var db: OpaquePointer?
+        XCTAssertEqual(sqlite3_open(url.path, &db), SQLITE_OK)
+        defer { sqlite3_close(db) }
+        XCTAssertEqual(sqlite3_exec(db, """
+            CREATE TABLE ZACCOUNT(ZIDENTIFIER TEXT, ZACCOUNTDESCRIPTION TEXT, ZUSERNAME TEXT);
+            """, nil, nil, nil), SQLITE_OK)
+        for row in rows {
+            var statement: OpaquePointer?
+            sqlite3_prepare_v2(db, "INSERT INTO ZACCOUNT VALUES (?, ?, ?)", -1, &statement, nil)
+            let transient = unsafeBitCast(-1, to: sqlite3_destructor_type.self)
+            sqlite3_bind_text(statement, 1, row.id, -1, transient)
+            if let description = row.description {
+                sqlite3_bind_text(statement, 2, description, -1, transient)
+            } else {
+                sqlite3_bind_null(statement, 2)
+            }
+            if let username = row.username {
+                sqlite3_bind_text(statement, 3, username, -1, transient)
+            } else {
+                sqlite3_bind_null(statement, 3)
+            }
+            XCTAssertEqual(sqlite3_step(statement), SQLITE_DONE)
+            sqlite3_finalize(statement)
+        }
         return url
     }
 
-    // Plist enriches each directory; EmailAddresses vs Username both resolve;
-    // results sort by label; MailData is never treated as an account.
+    // Database enriches each directory; results sort by label; MailData is
+    // never treated as an account.
     func testEnrichesAndSortsAccounts() throws {
         try makeAccountDir(uuidA)
         try makeAccountDir(uuidB)
-        let plist = try writeAccountsPlist([
-            ["UniqueId": uuidA, "AccountName": "Personal", "EmailAddresses": ["alice@example.com"]],
-            ["UniqueId": uuidB, "AccountName": "Work", "Username": "bob@work.example"],
+        let database = try writeAccountsDatabase([
+            (uuidA, "Personal", "alice@example.com"),
+            (uuidB, "Work", "bob@work.example"),
         ])
 
-        let accounts = MailAccountsReader.list(mailRoot: root, accountsPlist: plist)
+        let accounts = MailAccountsReader.list(mailRoot: root, accountsDatabase: database)
 
         XCTAssertEqual(accounts.map(\.id), [uuidA, uuidB], "sorted by label: Personal < Work")
         XCTAssertFalse(accounts.contains { $0.id == "MailData" }, "MailData is not an account")
@@ -61,17 +84,32 @@ final class MailAccountsTests: XCTestCase {
                        root.appendingPathComponent(uuidA, isDirectory: true).resolvingSymlinksInPath())
 
         let work = try XCTUnwrap(accounts.first { $0.id == uuidB })
-        XCTAssertEqual(work.email, "bob@work.example", "Username falls back to email when it looks like one")
+        XCTAssertEqual(work.email, "bob@work.example")
     }
 
-    // A directory with no plist entry still lists, labelled by its id.
-    func testUnmatchedDirectoryDegradesToId() throws {
-        try makeAccountDir(uuidC)
-        let plist = try writeAccountsPlist([
-            ["UniqueId": uuidA, "AccountName": "Personal", "EmailAddresses": ["alice@example.com"]],
+    // A ZUSERNAME that isn't an email address (e.g. "local", the "On My Mac"
+    // account) never surfaces as the email.
+    func testNonEmailUsernameIsIgnored() throws {
+        try makeAccountDir(uuidA)
+        let database = try writeAccountsDatabase([
+            (uuidA, "On My Mac", "local"),
         ])
 
-        let accounts = MailAccountsReader.list(mailRoot: root, accountsPlist: plist)
+        let accounts = MailAccountsReader.list(mailRoot: root, accountsDatabase: database)
+
+        let onMyMac = try XCTUnwrap(accounts.first { $0.id == uuidA })
+        XCTAssertEqual(onMyMac.email, "")
+        XCTAssertEqual(onMyMac.displayName, "On My Mac")
+    }
+
+    // A directory with no database row still lists, labelled by its id.
+    func testUnmatchedDirectoryDegradesToId() throws {
+        try makeAccountDir(uuidC)
+        let database = try writeAccountsDatabase([
+            (uuidA, "Personal", "alice@example.com"),
+        ])
+
+        let accounts = MailAccountsReader.list(mailRoot: root, accountsDatabase: database)
 
         XCTAssertEqual(accounts.map(\.id), [uuidC])
         let only = try XCTUnwrap(accounts.first)
@@ -81,13 +119,13 @@ final class MailAccountsTests: XCTestCase {
         XCTAssertEqual(only.storageKey, uuidC, "no email -> storage key is the directory id")
     }
 
-    // Missing plist: accounts still discovered from directories alone.
-    func testMissingPlistStillListsDirectories() throws {
+    // Missing database: accounts still discovered from directories alone.
+    func testMissingDatabaseStillListsDirectories() throws {
         try makeAccountDir(uuidA)
         try makeAccountDir(uuidB)
-        let missing = root.appendingPathComponent("MailData/Accounts.plist")
+        let missing = root.appendingPathComponent("does-not-exist.sqlite")
 
-        let accounts = MailAccountsReader.list(mailRoot: root, accountsPlist: missing)
+        let accounts = MailAccountsReader.list(mailRoot: root, accountsDatabase: missing)
 
         XCTAssertEqual(Set(accounts.map(\.id)), [uuidA, uuidB])
         XCTAssertTrue(accounts.allSatisfy { $0.email.isEmpty && $0.displayName.isEmpty })
@@ -97,17 +135,17 @@ final class MailAccountsTests: XCTestCase {
     func testMissingMailRootReturnsEmpty() {
         let absent = root.appendingPathComponent("does-not-exist", isDirectory: true)
         XCTAssertEqual(MailAccountsReader.list(mailRoot: absent,
-                                               accountsPlist: absent).count, 0)
+                                               accountsDatabase: absent).count, 0)
     }
 
     // A readable root reports .ok, even alongside real accounts.
     func testDiscoverReportsOkWhenReadable() throws {
         try makeAccountDir(uuidA)
-        let plist = try writeAccountsPlist([
-            ["UniqueId": uuidA, "AccountName": "Personal", "EmailAddresses": ["alice@example.com"]],
+        let database = try writeAccountsDatabase([
+            (uuidA, "Personal", "alice@example.com"),
         ])
 
-        let discovery = MailAccountsReader.discover(mailRoot: root, accountsPlist: plist)
+        let discovery = MailAccountsReader.discover(mailRoot: root, accountsDatabase: database)
 
         XCTAssertEqual(discovery.status, .ok)
         XCTAssertEqual(discovery.accounts.map(\.id), [uuidA])
@@ -116,7 +154,7 @@ final class MailAccountsTests: XCTestCase {
     // A missing root is "not set up", not a permission problem.
     func testDiscoverReportsNotFoundForMissingRoot() {
         let absent = root.appendingPathComponent("does-not-exist", isDirectory: true)
-        let discovery = MailAccountsReader.discover(mailRoot: absent, accountsPlist: absent)
+        let discovery = MailAccountsReader.discover(mailRoot: absent, accountsDatabase: absent)
         XCTAssertEqual(discovery.status, .notFound)
         XCTAssertTrue(discovery.accounts.isEmpty)
     }
@@ -132,7 +170,7 @@ final class MailAccountsTests: XCTestCase {
         defer { try? fm.setAttributes([.posixPermissions: 0o755], ofItemAtPath: root.path) }
 
         let discovery = MailAccountsReader.discover(
-            mailRoot: root, accountsPlist: root.appendingPathComponent("MailData/Accounts.plist"))
+            mailRoot: root, accountsDatabase: root.appendingPathComponent("Accounts4.sqlite"))
 
         XCTAssertEqual(discovery.status, .permissionDenied)
         XCTAssertTrue(discovery.accounts.isEmpty)

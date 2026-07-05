@@ -66,8 +66,14 @@ public enum Defaults {
     }
 
     /// Maps account UUIDs to names/emails for the account picker (MailAccounts).
-    public static var accountsPlistURL: URL {
-        mailRoot.appendingPathComponent("MailData/Accounts.plist")
+    ///
+    /// Mail no longer ships a per-version `Accounts.plist` (verified absent on a
+    /// live macOS 15 install, spike B11 #1) — account name/email now live in the
+    /// system-wide Internet Accounts store, keyed by the same UUID that names
+    /// each `~/Library/Mail/V<n>/<uuid>` directory.
+    public static var accountsDatabaseURL: URL {
+        FileManager.default.homeDirectoryForCurrentUser
+            .appendingPathComponent("Library/Accounts/Accounts4.sqlite")
     }
     public static var envelopeIndexPath: String {
         mailRoot.appendingPathComponent("MailData/Envelope Index").path

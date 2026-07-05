@@ -1,4 +1,5 @@
 import Foundation
+import SQLite3
 
 /// A single Apple Mail account discovered on disk, enriched with the friendly
 /// name and email address from Accounts.plist when those are available.
@@ -70,25 +71,20 @@ public struct MailDiscovery: Sendable {
 }
 
 /// Enumerates Apple Mail accounts by listing the account directories under the
-/// Mail root and enriching each with its name/email from Accounts.plist.
+/// Mail root and enriching each with its name/email from the system-wide
+/// Internet Accounts database.
 ///
 /// The directory listing is the source of truth for *which* accounts exist
-/// (only a directory holds ingestable .emlx); the plist only supplies friendly
-/// labels. When the plist is missing or a key can't be matched, the account
-/// still lists, labelled by its directory id.
+/// (only a directory holds ingestable .emlx); the database only supplies
+/// friendly labels. When a row is missing or the database can't be read, the
+/// account still lists, labelled by its directory id.
 ///
-/// NOTE (spike B11 #1): the Accounts.plist keys below match the commonly
-/// documented Mail layout — a top-level array (or a `MailAccounts` array) of
-/// per-account dicts carrying an account name, email addresses, and a UUID that
-/// equals the account's directory name. They MUST be validated against a real
-/// `~/Library/Mail/V10/MailData/Accounts.plist` on the target macOS version
-/// before first live run; the tests use a synthetic plist with this schema.
+/// NOTE (spike B11 #1, verified on a live macOS 15 install): Mail no longer
+/// writes a per-version `Accounts.plist` — that file doesn't exist. Account
+/// name/email instead live in `~/Library/Accounts/Accounts4.sqlite`, table
+/// `ZACCOUNT`, keyed by `ZIDENTIFIER` — confirmed to equal the same UUID that
+/// names each `~/Library/Mail/V<n>/<uuid>` directory.
 public enum MailAccountsReader {
-
-    /// Keys that may hold the account's directory UUID, in priority order.
-    private static let idKeys = ["UniqueId", "Identifier", "AccountID", "AccountUniqueID"]
-    /// Keys that may hold a user-facing account name, in priority order.
-    private static let nameKeys = ["AccountName", "FullUserName", "Description"]
 
     private struct AccountInfo {
         let email: String
@@ -100,8 +96,8 @@ public enum MailAccountsReader {
     /// Convenience wrapper over `discover` for callers that don't need to know
     /// *why* the list is empty.
     public static func list(mailRoot: URL = Defaults.mailRoot,
-                            accountsPlist: URL = Defaults.accountsPlistURL) -> [MailAccount] {
-        discover(mailRoot: mailRoot, accountsPlist: accountsPlist).accounts
+                            accountsDatabase: URL = Defaults.accountsDatabaseURL) -> [MailAccount] {
+        discover(mailRoot: mailRoot, accountsDatabase: accountsDatabase).accounts
     }
 
     /// Lists accounts under `mailRoot` and reports whether the read itself
@@ -109,7 +105,7 @@ public enum MailAccountsReader {
     /// Access block or a missing Mail folder. Both parameters are injectable so
     /// tests can point at a synthetic tree.
     public static func discover(mailRoot: URL = Defaults.mailRoot,
-                                accountsPlist: URL = Defaults.accountsPlistURL) -> MailDiscovery {
+                                accountsDatabase: URL = Defaults.accountsDatabaseURL) -> MailDiscovery {
         let entries: [URL]
         do {
             entries = try FileManager.default.contentsOfDirectory(
@@ -120,7 +116,7 @@ public enum MailAccountsReader {
             return MailDiscovery(accounts: [], status: classify(error))
         }
 
-        let meta = metadata(plistURL: accountsPlist)
+        let meta = metadata(databaseURL: accountsDatabase)
         let accounts = entries
             .filter { url in
                 guard url.lastPathComponent != "MailData" else { return false }
@@ -153,54 +149,38 @@ public enum MailAccountsReader {
         return .notFound
     }
 
-    /// Parses Accounts.plist into a map keyed by account UUID. Returns an empty
-    /// map (never throws) when the file is absent or unparseable, so discovery
-    /// degrades to directory-id labels rather than failing.
-    private static func metadata(plistURL: URL) -> [String: AccountInfo] {
-        guard let data = try? Data(contentsOf: plistURL),
-              let root = try? PropertyListSerialization.propertyList(from: data, options: [], format: nil)
+    /// Reads `ZACCOUNT` from the Internet Accounts database into a map keyed by
+    /// account UUID (`ZIDENTIFIER`). Returns an empty map (never throws) when
+    /// the file is absent or unreadable, so discovery degrades to directory-id
+    /// labels rather than failing. Opened read-only: this database is live
+    /// system state owned by accountsd, not something AskMail should ever write.
+    private static func metadata(databaseURL: URL) -> [String: AccountInfo] {
+        var handle: OpaquePointer?
+        defer { if let handle { sqlite3_close(handle) } }
+        guard sqlite3_open_v2(databaseURL.path, &handle, SQLITE_OPEN_READONLY, nil) == SQLITE_OK,
+              let db = handle
         else { return [:] }
 
+        var statement: OpaquePointer?
+        defer { sqlite3_finalize(statement) }
+        let sql = "SELECT ZIDENTIFIER, ZACCOUNTDESCRIPTION, ZUSERNAME FROM ZACCOUNT"
+        guard sqlite3_prepare_v2(db, sql, -1, &statement, nil) == SQLITE_OK, let statement else { return [:] }
+
         var map: [String: AccountInfo] = [:]
-        for dict in accountEntries(from: root) {
-            guard let id = firstString(dict, keys: idKeys) else { continue }
-            map[id] = AccountInfo(email: primaryEmail(dict),
-                                  name: firstString(dict, keys: nameKeys) ?? "")
+        while sqlite3_step(statement) == SQLITE_ROW {
+            guard let id = columnText(statement, 0) else { continue }
+            let username = columnText(statement, 2) ?? ""
+            map[id] = AccountInfo(email: username.contains("@") ? username : "",
+                                  name: columnText(statement, 1) ?? "")
         }
         return map
     }
 
-    /// Normalises the two documented plist shapes to a flat array of account
-    /// dicts: a bare top-level array, or a dict wrapping a `MailAccounts` array.
-    private static func accountEntries(from root: Any) -> [[String: Any]] {
-        if let array = root as? [[String: Any]] {
-            return array
-        }
-        if let dict = root as? [String: Any],
-           let accounts = dict["MailAccounts"] as? [[String: Any]] {
-            return accounts
-        }
-        return []
-    }
-
-    private static func primaryEmail(_ dict: [String: Any]) -> String {
-        if let addresses = dict["EmailAddresses"] as? [String],
-           let first = addresses.first(where: { $0.contains("@") }) {
-            return first
-        }
-        if let single = dict["EmailAddress"] as? String, single.contains("@") {
-            return single
-        }
-        if let username = dict["Username"] as? String, username.contains("@") {
-            return username
-        }
-        return ""
-    }
-
-    private static func firstString(_ dict: [String: Any], keys: [String]) -> String? {
-        for key in keys {
-            if let value = dict[key] as? String, !value.isEmpty { return value }
-        }
-        return nil
+    private static func columnText(_ statement: OpaquePointer, _ index: Int32) -> String? {
+        guard sqlite3_column_type(statement, index) != SQLITE_NULL,
+              let cString = sqlite3_column_text(statement, index)
+        else { return nil }
+        let text = String(cString: cString)
+        return text.isEmpty ? nil : text
     }
 }
