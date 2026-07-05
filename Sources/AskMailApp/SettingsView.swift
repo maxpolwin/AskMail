@@ -7,6 +7,7 @@ struct SettingsView: View {
     @ObservedObject private var settings = SettingsStore.shared
     @State private var ollamaCloudKey = ""
     @State private var mistralKey = ""
+    @State private var keysStatus = ""
     @State private var showCopyLogsWarning = false
     @State private var showRebuildConfirmation = false
     @State private var vectorizeProgress: IngestProgress?
@@ -64,16 +65,9 @@ struct SettingsView: View {
             Section("API keys (stored in Keychain, never in files)") {
                 SecureField("Ollama Cloud key", text: $ollamaCloudKey)
                 SecureField("Mistral key", text: $mistralKey)
-                Button("Save keys") {
-                    if !ollamaCloudKey.isEmpty {
-                        Keychain.setAPIKey(ollamaCloudKey, service: Defaults.keychainServiceOllamaCloud)
-                        ollamaCloudKey = ""
-                    }
-                    if !mistralKey.isEmpty {
-                        Keychain.setAPIKey(mistralKey, service: Defaults.keychainServiceMistral)
-                        mistralKey = ""
-                    }
-                    statusMessage = "Keys saved to Keychain."
+                Button("Save keys") { saveKeys() }
+                if !keysStatus.isEmpty {
+                    Text(keysStatus).font(.caption).foregroundStyle(.secondary)
                 }
             }
 
@@ -105,6 +99,39 @@ struct SettingsView: View {
                             isPresented: $showRebuildConfirmation) {
             Button("Delete & rebuild", role: .destructive) { deleteAndRebuild() }
             Button("Cancel", role: .cancel) {}
+        }
+    }
+
+    /// Writes only the non-empty fields, verifies each Keychain write, and
+    /// reports the real outcome next to the button. Never claims success when
+    /// nothing was entered or when SecItemAdd fails.
+    private func saveKeys() {
+        var saved: [String] = []
+        var failed: [String] = []
+
+        func store(_ value: String, service: String, label: String, clear: () -> Void) {
+            guard !value.isEmpty else { return }
+            if Keychain.setAPIKey(value, service: service) {
+                saved.append(label)
+                clear()
+            } else {
+                failed.append(label)
+                RollingLog.shared.log("keychain write FAILED for service \(service)")
+            }
+        }
+
+        store(ollamaCloudKey, service: Defaults.keychainServiceOllamaCloud,
+              label: "Ollama Cloud") { ollamaCloudKey = "" }
+        store(mistralKey, service: Defaults.keychainServiceMistral,
+              label: "Mistral") { mistralKey = "" }
+
+        if saved.isEmpty && failed.isEmpty {
+            keysStatus = "Enter a key first \u{2014} nothing to save."
+        } else if failed.isEmpty {
+            keysStatus = "Saved to Keychain: \(saved.joined(separator: ", "))."
+        } else {
+            let ok = saved.isEmpty ? "" : "Saved: \(saved.joined(separator: ", ")). "
+            keysStatus = "\(ok)Failed: \(failed.joined(separator: ", ")). See Keychain Access / logs."
         }
     }
 
