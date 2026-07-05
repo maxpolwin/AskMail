@@ -10,6 +10,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private var statusItem: NSStatusItem?
     private var settingsWindow: NSWindow?
     private var askMenuItem: NSMenuItem?
+    private var scheduler: VectorizationScheduler?
     private var cancellables = Set<AnyCancellable>()
 
     func applicationDidFinishLaunching(_ notification: Notification) {
@@ -28,6 +29,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
         setUpStatusItem()
         observeHotkeyChanges()
+
+        // Hourly incremental vectorization while on AC power (FR-5), plus a
+        // catch-up at launch. Manual runs stay available in Settings (FR-6).
+        let scheduler = VectorizationScheduler()
+        scheduler.start()
+        self.scheduler = scheduler
     }
 
     private func setUpStatusItem() {

@@ -13,11 +13,14 @@ public struct IngestProgress: Sendable {
 public struct IngestSummary: Sendable {
     public var ingested: Int
     public var failed: Int
+    /// Files unchanged since a prior run, skipped without re-embedding (FR-5).
+    public var skipped: Int
     public var newWatermark: Int64?
 
-    public init(ingested: Int, failed: Int, newWatermark: Int64?) {
+    public init(ingested: Int, failed: Int, skipped: Int = 0, newWatermark: Int64?) {
         self.ingested = ingested
         self.failed = failed
+        self.skipped = skipped
         self.newWatermark = newWatermark
     }
 }
@@ -73,6 +76,48 @@ public final class MailboxIngestor {
         }
         log("ingest done: \(ingested) ok, \(failed) failed, watermark=\(String(describing: newWatermark))")
         return IngestSummary(ingested: ingested, failed: failed, newWatermark: newWatermark)
+    }
+
+    /// Incremental ingest (FR-5): processes only files new or changed since the
+    /// last run, skipping any whose fingerprint the store already recorded.
+    /// Each processed file's fingerprint is committed as it succeeds, so a crash
+    /// mid-run resumes from where it stopped rather than restarting. Individual
+    /// file failures are logged and skipped, never aborting the run.
+    @discardableResult
+    public func ingestNew(_ files: [EmlxFile],
+                          progress: (@Sendable (IngestProgress) -> Void)? = nil) async throws -> IngestSummary {
+        var ingested = 0
+        var failed = 0
+        var skipped = 0
+        var maxDate: Int64 = (try? store.watermark()) ?? 0
+
+        for (index, file) in files.enumerated() {
+            if let seen = try? store.ingestedFingerprint(sourceID: file.sourceID),
+               seen == file.fingerprint {
+                skipped += 1
+                progress?(IngestProgress(processed: index + 1, total: files.count))
+                continue
+            }
+            do {
+                let email = try EmlxParser.parse(fileURL: file.url)
+                try await ingest(email: email)
+                try store.recordIngested(sourceID: file.sourceID, fingerprint: file.fingerprint)
+                ingested += 1
+                maxDate = max(maxDate, email.dateUnix)
+            } catch {
+                failed += 1
+                log("ingest FAILED file=\(file.url.lastPathComponent) error=\(error)")
+            }
+            progress?(IngestProgress(processed: index + 1, total: files.count))
+        }
+
+        var newWatermark: Int64? = nil
+        if maxDate > 0 {
+            try store.setWatermark(maxDate)
+            newWatermark = maxDate
+        }
+        log("ingest done (incremental): \(ingested) new, \(skipped) unchanged, \(failed) failed")
+        return IngestSummary(ingested: ingested, failed: failed, skipped: skipped, newWatermark: newWatermark)
     }
 
     public func ingest(email: ParsedEmail) async throws {

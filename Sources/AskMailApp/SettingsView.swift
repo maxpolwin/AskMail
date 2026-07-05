@@ -5,13 +5,14 @@ import SwiftUI
 
 struct SettingsView: View {
     @ObservedObject private var settings = SettingsStore.shared
+    @ObservedObject private var vectorizer = Vectorizer.shared
     @State private var ollamaCloudKey = ""
     @State private var mistralKey = ""
     @State private var keysStatus = ""
     @State private var showCopyLogsWarning = false
     @State private var showRebuildConfirmation = false
-    @State private var vectorizeProgress: IngestProgress?
     @State private var statusMessage = ""
+    @State private var launchAtLogin = LoginItem.isEnabled
     @State private var accounts: [MailAccount] = []
     @State private var accessStatus: MailAccessStatus = .ok
 
@@ -58,13 +59,21 @@ struct SettingsView: View {
                     .foregroundStyle(.secondary)
             }
 
+            Section("Startup") {
+                Toggle("Open AskMail at login", isOn: $launchAtLogin)
+                    .onChange(of: launchAtLogin) { _, enabled in setLaunchAtLogin(enabled) }
+                Text("Runs AskMail automatically when you log in, so the hotkey and hourly vectorization are always available. Requires the packaged app (not \u{201C}swift run\u{201D}).")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+            }
+
             Section("Vectorization") {
                 LabeledContent("Last vectorized") {
                     Text(settings.lastVectorized.map {
                         $0.formatted(date: .abbreviated, time: .shortened)
                     } ?? "never")
                 }
-                if let progress = vectorizeProgress {
+                if let progress = vectorizer.progress {
                     VStack(alignment: .leading, spacing: 6) {
                         if progress.total == 0 {
                             // File count not known yet: indeterminate, same hairline
@@ -83,15 +92,21 @@ struct SettingsView: View {
                     }
                 }
                 HStack {
-                    Button("Vectorize now") { vectorizeNow() }
-                        .disabled(vectorizeProgress != nil)
+                    Button("Vectorize now") { Task { await vectorizer.run(.manual) } }
+                        .disabled(vectorizer.progress != nil)
                     Button("Delete & rebuild\u{2026}", role: .destructive) {
                         showRebuildConfirmation = true
                     }
                 }
+                if !vectorizer.status.isEmpty {
+                    Text(vectorizer.status).font(.caption).foregroundStyle(.secondary)
+                }
                 if !statusMessage.isEmpty {
                     Text(statusMessage).font(.caption).foregroundStyle(.secondary)
                 }
+                Text("New mail is vectorized automatically every hour while on power. Only new or changed messages are processed.")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
             }
 
             Section("Generation") {
@@ -133,7 +148,10 @@ struct SettingsView: View {
         .frame(width: 520, height: 640)
         .background(.ultraThinMaterial)      // same frosted family as the ask panel
         .tint(Theme.accent)                  // one shared system accent
-        .onAppear { loadAccounts() }
+        .onAppear {
+            loadAccounts()
+            launchAtLogin = LoginItem.isEnabled   // reflect external changes
+        }
         .alert("Copy debug logs?", isPresented: $showCopyLogsWarning) {
             Button("Copy", role: .destructive) {
                 NSPasteboard.general.clearContents()
@@ -230,38 +248,15 @@ struct SettingsView: View {
         }
     }
 
-    /// Manual trigger: runs regardless of power state (FR-6).
-    private func vectorizeNow() {
-        guard let directory = settings.accountDirectoryURL else {
-            statusMessage = "Select an account first."
-            return
-        }
-        let storageKey = settings.accountStorageKey
-        vectorizeProgress = IngestProgress(processed: 0, total: 0)
-        statusMessage = ""
-        Task {
-            do {
-                let store = try SQLiteStore(path: SettingsStore.databasePath)
-                let ingestor = MailboxIngestor(store: store,
-                                               embedder: OllamaEmbedder(),
-                                               account: storageKey)
-                let files = EmlxLocator.index(accountDirectory: directory)
-                    .values.sorted { $0.path < $1.path }
-                let summary = try await ingestor.ingest(files: files) { progress in
-                    Task { @MainActor in vectorizeProgress = progress }
-                }
-                await MainActor.run {
-                    settings.lastVectorized = Date()
-                    statusMessage = "Done: \(summary.ingested) ingested, \(summary.failed) failed."
-                    vectorizeProgress = nil
-                }
-            } catch {
-                RollingLog.shared.log("manual vectorize failed: \(error)")
-                await MainActor.run {
-                    statusMessage = "Vectorization failed: \(error)"
-                    vectorizeProgress = nil
-                }
-            }
+    /// Applies the launch-at-login toggle, reverting the switch if macOS rejects
+    /// the change so the UI never claims a state that didn't take.
+    private func setLaunchAtLogin(_ enabled: Bool) {
+        do {
+            try LoginItem.setEnabled(enabled)
+        } catch {
+            RollingLog.shared.log("login item change failed: \(error)")
+            statusMessage = "Couldn't \(enabled ? "enable" : "disable") open-at-login: \(error.localizedDescription)"
+            launchAtLogin = LoginItem.isEnabled
         }
     }
 

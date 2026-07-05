@@ -43,8 +43,9 @@ strings in a document.
 | Embed batch size | 128 | tune to memory pressure. |
 | Attachment types (v1) | PDF only | |
 | Max attachment size | 25 MB | skip larger; log skip. |
-| Scheduled run gate | AC power only | manual trigger ignores. |
-| Schedule interval | every 6 h | launchd StartInterval; only fires on power. |
+| Scheduled run gate | AC power only | manual trigger ignores; off-power runs are skipped, not queued. |
+| Schedule interval | every 1 h | in-app timer while the app runs, + catch-up at launch and on plug-in. Only fires on AC power. |
+| Ingest scope | new/changed only | per-file fingerprint (ROWID + mod-time/size); unchanged files are skipped. |
 
 ## UI
 | Parameter | Default | Notes |

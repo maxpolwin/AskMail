@@ -1,0 +1,142 @@
+import AskMailCore
+import Combine
+import CoreFoundation
+import Foundation
+import IOKit.ps
+
+/// Whether the Mac is currently running on AC power. Scheduled vectorization
+/// only runs on AC (FR-5); the manual trigger ignores this.
+enum PowerState {
+    static var isOnACPower: Bool {
+        guard let info = IOPSCopyPowerSourcesInfo() else { return true }
+        let snapshot = info.takeRetainedValue()
+        guard let typeRef = IOPSGetProvidingPowerSourceType(snapshot) else { return true }
+        // Fail open: if the power state is unknowable, don't block ingestion.
+        return (typeRef.takeUnretainedValue() as String) == kIOPSACPowerValue
+    }
+}
+
+/// Single owner of vectorization for the app. Both the Settings button (manual)
+/// and the hourly scheduler funnel through `run(_:)`, so runs share one code
+/// path and can never overlap. Publishes progress/status for the Settings UI.
+@MainActor
+final class Vectorizer: ObservableObject {
+    static let shared = Vectorizer()
+
+    enum Trigger: String { case manual, scheduled }
+
+    @Published private(set) var progress: IngestProgress?
+    @Published private(set) var status: String = ""
+    private var isRunning = false
+
+    private let settings = SettingsStore.shared
+
+    /// Runs an incremental vectorization. Manual runs report problems (no
+    /// account, etc.) via `status`; scheduled runs stay silent and skip when off
+    /// power (FR-5: skipped, not queued).
+    @discardableResult
+    func run(_ trigger: Trigger) async -> IngestSummary? {
+        guard !isRunning else {
+            if trigger == .manual { status = "A vectorization run is already in progress." }
+            return nil
+        }
+        guard let directory = settings.accountDirectoryURL else {
+            if trigger == .manual { status = "Select an account first." }
+            return nil
+        }
+        if trigger == .scheduled && !PowerState.isOnACPower {
+            RollingLog.shared.log("scheduled vectorize skipped: on battery")
+            return nil
+        }
+
+        isRunning = true
+        progress = IngestProgress(processed: 0, total: 0)
+        status = ""
+        defer {
+            isRunning = false
+            progress = nil
+        }
+
+        let storageKey = settings.accountStorageKey
+        do {
+            let store = try SQLiteStore(path: SettingsStore.databasePath)
+            let ingestor = MailboxIngestor(store: store,
+                                           embedder: OllamaEmbedder(),
+                                           account: storageKey)
+            let files = EmlxLocator.scan(accountDirectory: directory)
+                .sorted { $0.sourceID < $1.sourceID }
+            let summary = try await ingestor.ingestNew(files) { update in
+                Task { @MainActor in
+                    let v = Vectorizer.shared
+                    if v.isRunning { v.progress = update }
+                }
+            }
+            settings.lastVectorized = Date()
+            status = "Done: \(summary.ingested) new, \(summary.skipped) unchanged, \(summary.failed) failed."
+            RollingLog.shared.log(
+                "\(trigger.rawValue) vectorize done: \(summary.ingested) new, "
+                + "\(summary.skipped) unchanged, \(summary.failed) failed")
+            return summary
+        } catch {
+            RollingLog.shared.log("\(trigger.rawValue) vectorize failed: \(error)")
+            status = "Vectorization failed: \(error)"
+            return nil
+        }
+    }
+}
+
+/// Drives scheduled vectorization: hourly while the app runs, plus a catch-up at
+/// launch and whenever the Mac is plugged in. The AC-power gate lives in
+/// `Vectorizer.run(.scheduled)`, so a run that fires on battery is skipped, not
+/// queued (FR-5). Best-effort: the timer does not fire while the Mac is asleep,
+/// but wake-from-sleep raises a power-source change that triggers a catch-up.
+@MainActor
+final class VectorizationScheduler {
+    /// Hourly, per the user's requirement (docs default is 6 h).
+    static let interval: TimeInterval = 3600
+    /// Ignore plug-in catch-ups within this window of the last run, so rapid
+    /// unplug/replug doesn't launch back-to-back runs.
+    private static let plugInDebounce: TimeInterval = 300
+
+    private var timer: Timer?
+    private var powerSource: CFRunLoopSource?
+
+    func start() {
+        let timer = Timer(timeInterval: Self.interval, repeats: true) { _ in
+            Task { @MainActor in await Vectorizer.shared.run(.scheduled) }
+        }
+        timer.tolerance = 60
+        RunLoop.main.add(timer, forMode: .common)
+        self.timer = timer
+
+        observePowerChanges()
+        RollingLog.shared.log("scheduler started: hourly vectorization on AC power")
+        // Catch up now in case the Mac was asleep or the app was closed.
+        Task { await Vectorizer.shared.run(.scheduled) }
+    }
+
+    /// Registers for IOKit power-source changes (plug in/out, wake) so plugging
+    /// in kicks off a due run rather than waiting for the next hourly tick.
+    private func observePowerChanges() {
+        let context = Unmanaged.passUnretained(self).toOpaque()
+        let callback: IOPowerSourceCallbackType = { rawContext in
+            guard let rawContext else { return }
+            let scheduler = Unmanaged<VectorizationScheduler>.fromOpaque(rawContext)
+                .takeUnretainedValue()
+            Task { @MainActor in scheduler.powerChanged() }
+        }
+        guard let source = IOPSNotificationCreateRunLoopSource(callback, context)?
+            .takeRetainedValue() else { return }
+        CFRunLoopAddSource(CFRunLoopGetMain(), source, .defaultMode)
+        powerSource = source
+    }
+
+    private func powerChanged() {
+        guard PowerState.isOnACPower else { return }
+        if let last = SettingsStore.shared.lastVectorized,
+           Date().timeIntervalSince(last) < Self.plugInDebounce {
+            return
+        }
+        Task { await Vectorizer.shared.run(.scheduled) }
+    }
+}

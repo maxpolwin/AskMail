@@ -90,6 +90,16 @@ public final class SQLiteStore {
           value TEXT NOT NULL
         );
         """)
+        // Per-source-file fingerprint so incremental runs skip unchanged
+        // messages and resume after a crash (FR-5). Keyed by the envelope-index
+        // ROWID parsed from the .emlx filename; the fingerprint changes whenever
+        // Mail rewrites the file (e.g. a .partial becomes fully downloaded).
+        try execute("""
+        CREATE TABLE IF NOT EXISTS ingest_state(
+          source_id INTEGER PRIMARY KEY,
+          fingerprint TEXT NOT NULL
+        );
+        """)
     }
 
     // MARK: Messages & chunks
@@ -234,6 +244,34 @@ public final class SQLiteStore {
         try setMeta(Self.watermarkKey, value: String(value))
     }
 
+    // MARK: Ingest state (FR-5 incremental)
+
+    /// Fingerprint recorded for a source file's ROWID, or nil if never ingested.
+    public func ingestedFingerprint(sourceID: Int64) throws -> String? {
+        lock.lock(); defer { lock.unlock() }
+        var result: String? = nil
+        try query("SELECT fingerprint FROM ingest_state WHERE source_id = ?") { statement in
+            sqlite3_bind_int64(statement, 1, sourceID)
+        } row: { statement in
+            result = column(statement, 0)
+        }
+        return result
+    }
+
+    /// Marks a source file as ingested at the given fingerprint. Written last in
+    /// a message's ingest so a crash before this point simply re-ingests it next
+    /// run (upserts are idempotent).
+    public func recordIngested(sourceID: Int64, fingerprint: String) throws {
+        lock.lock(); defer { lock.unlock() }
+        try run("""
+        INSERT INTO ingest_state(source_id, fingerprint) VALUES (?, ?)
+        ON CONFLICT(source_id) DO UPDATE SET fingerprint = excluded.fingerprint
+        """) { statement in
+            sqlite3_bind_int64(statement, 1, sourceID)
+            bind(statement, 2, fingerprint)
+        }
+    }
+
     public func meta(_ key: String) throws -> String? {
         lock.lock(); defer { lock.unlock() }
         var value: String?
@@ -261,6 +299,7 @@ public final class SQLiteStore {
         lock.lock(); defer { lock.unlock() }
         try run("DELETE FROM messages") { _ in }   // chunks cascade, FTS via trigger
         try run("DELETE FROM meta") { _ in }
+        try run("DELETE FROM ingest_state") { _ in }
     }
 
     public func messageCount() throws -> Int {

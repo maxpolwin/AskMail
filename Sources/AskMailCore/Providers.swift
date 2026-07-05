@@ -44,6 +44,31 @@ public enum ProviderError: Error, CustomStringConvertible {
     }
 }
 
+// MARK: - Retry
+
+/// Small async retry helper with backoff. Used to keep transient failures
+/// (network timeouts, a briefly-unavailable local Ollama, wake-from-sleep) from
+/// failing a whole email during ingestion (FR-5 robustness).
+public enum Retry {
+    public static func run<T>(attempts: Int,
+                              backoff: @Sendable (Int) -> UInt64 = { UInt64($0) * 500_000_000 },
+                              shouldRetry: @Sendable (Error) -> Bool = { _ in true },
+                              operation: () async throws -> T) async throws -> T {
+        var lastError: Error?
+        let total = max(1, attempts)
+        for attempt in 1...total {
+            do {
+                return try await operation()
+            } catch {
+                lastError = error
+                guard attempt < total, shouldRetry(error) else { throw error }
+                try? await Task.sleep(nanoseconds: backoff(attempt))
+            }
+        }
+        throw lastError!  // unreachable: the loop returns or throws
+    }
+}
+
 // MARK: - Ollama (local and cloud)
 
 /// Chat via the Ollama /api/chat NDJSON streaming API. With `apiKey` set it
@@ -127,16 +152,26 @@ public struct OllamaClient: ChatProvider {
 public struct OllamaEmbedder: EmbeddingProvider {
     public var host: URL
     public var model: String
+    /// Total attempts per batch before giving up on that email (FR-5 robustness).
+    public var maxAttempts: Int
+    /// Per-request timeout; generous because a large batch of chunks can take a
+    /// while on first load, and the default 60 s truncates otherwise.
+    public var timeout: TimeInterval
 
     public init(host: URL = Defaults.ollamaLocalHost,
-                model: String = Defaults.embeddingModel) {
+                model: String = Defaults.embeddingModel,
+                maxAttempts: Int = 3,
+                timeout: TimeInterval = 120) {
         self.host = host
         self.model = model
+        self.maxAttempts = maxAttempts
+        self.timeout = timeout
     }
 
     public func embed(_ texts: [String]) async throws -> [[Float]] {
         guard !texts.isEmpty else { return [] }
-        var request = URLRequest(url: host.appendingPathComponent("api/embed"))
+        var request = URLRequest(url: host.appendingPathComponent("api/embed"),
+                                 timeoutInterval: timeout)
         request.httpMethod = "POST"
         request.setValue("application/json", forHTTPHeaderField: "Content-Type")
         request.httpBody = try JSONSerialization.data(withJSONObject: [
@@ -146,18 +181,28 @@ public struct OllamaEmbedder: EmbeddingProvider {
             "options": ["num_ctx": 8192],
         ] as [String: Any])
 
-        let (data, response) = try await URLSession.shared.data(for: request)
-        if let http = response as? HTTPURLResponse, !(200...299).contains(http.statusCode) {
-            throw ProviderError.http(status: http.statusCode,
-                                     body: String(data: data, encoding: .utf8) ?? "")
+        // Retry transport errors and 5xx (transient), but not 4xx (won't fix by
+        // retrying — e.g. model not pulled), so a real misconfiguration fails fast.
+        return try await Retry.run(attempts: maxAttempts, shouldRetry: Self.isTransient) {
+            let (data, response) = try await URLSession.shared.data(for: request)
+            if let http = response as? HTTPURLResponse, !(200...299).contains(http.statusCode) {
+                throw ProviderError.http(status: http.statusCode,
+                                         body: String(data: data, encoding: .utf8) ?? "")
+            }
+            guard let json = try JSONSerialization.jsonObject(with: data) as? [String: Any],
+                  let raw = json["embeddings"] as? [[Any]] else {
+                throw ProviderError.malformedResponse("no embeddings array")
+            }
+            return raw.map { vector in
+                vector.compactMap { ($0 as? NSNumber)?.floatValue }
+            }
         }
-        guard let json = try JSONSerialization.jsonObject(with: data) as? [String: Any],
-              let raw = json["embeddings"] as? [[Any]] else {
-            throw ProviderError.malformedResponse("no embeddings array")
-        }
-        return raw.map { vector in
-            vector.compactMap { ($0 as? NSNumber)?.floatValue }
-        }
+    }
+
+    @Sendable
+    static func isTransient(_ error: Error) -> Bool {
+        if case ProviderError.http(let status, _) = error { return (500...599).contains(status) }
+        return true  // URLError timeouts / connection drops are worth retrying
     }
 }
 

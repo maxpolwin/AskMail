@@ -30,7 +30,7 @@ now; docs/ carries the build-relevant contracts. Add it as
 
 ```sh
 swift build          # library + app
-swift test           # 36 headless tests against Tests/Fixtures
+swift test           # headless tests against Tests/Fixtures
 swift run askmail    # menu-bar app (needs local Ollama for real queries)
 ```
 
@@ -72,12 +72,15 @@ Done and under test:
 - App shell: global hotkey, floating dark panel, settings window with
   manual vectorization, provider/limits/system-prompt editing, log copy
   with content warning
+- Scheduled vectorization (FR-5): hourly in-app timer gated on AC power, plus
+  catch-up at launch and on plug-in. Incremental — a per-file fingerprint
+  (ROWID + mod-time/size) skips unchanged messages, so runs process only new or
+  changed mail and resume after a crash. Embedder retries transient failures.
 
 Open (tracked against docs/definition-of-done.md):
 - Envelope-index column names must be validated against a real V10 index
   (spike B11 #1); ingestion currently scans the account directory for .emlx
 - sqlite-vec swap-in for vector search (brute-force exact scan today)
-- Scheduled vectorization via launchd with AC-power gate (FR-5)
 - Hotkey re-registration on settings change; hotkey recorder UI
 - Eval runners for Tests/Evals (Recall@8 gate and generation assertions,
   including `expect_not_matches` regexes)

@@ -84,10 +84,58 @@ public final class EnvelopeIndexReader {
     }
 }
 
+/// One .emlx file on disk with the identity and change-fingerprint used to
+/// decide whether it still needs (re-)ingesting.
+public struct EmlxFile: Sendable {
+    /// Envelope-index ROWID parsed from the filename; stable across re-syncs.
+    public var sourceID: Int64
+    public var url: URL
+    /// Cheap change signal (modification time + size). When Mail rewrites the
+    /// file — e.g. a `.partial` becomes fully downloaded — this changes, so the
+    /// message is re-ingested; otherwise it is skipped.
+    public var fingerprint: String
+
+    public init(sourceID: Int64, url: URL, fingerprint: String) {
+        self.sourceID = sourceID
+        self.url = url
+        self.fingerprint = fingerprint
+    }
+}
+
 /// Locates .emlx files for envelope-index row ids under an account directory.
 /// Apple Mail stores them as `<ROWID>.emlx` or `<ROWID>.partial.emlx` in
 /// nested `Messages` directories.
 public enum EmlxLocator {
+
+    /// Scans the account tree once, returning one entry per message ROWID with a
+    /// change fingerprint. Prefers a fully-downloaded file over its `.partial`
+    /// sibling when both are present for the same ROWID.
+    public static func scan(accountDirectory: URL) -> [EmlxFile] {
+        let keys: [URLResourceKey] = [.isRegularFileKey, .contentModificationDateKey, .fileSizeKey]
+        var byID: [Int64: EmlxFile] = [:]
+        let enumerator = FileManager.default.enumerator(
+            at: accountDirectory,
+            includingPropertiesForKeys: keys,
+            options: [.skipsHiddenFiles]
+        )
+        while let item = enumerator?.nextObject() as? URL {
+            let name = item.lastPathComponent
+            guard name.hasSuffix(".emlx") else { continue }
+            let isPartial = name.hasSuffix(".partial.emlx")
+            let stem = name
+                .replacingOccurrences(of: ".partial.emlx", with: "")
+                .replacingOccurrences(of: ".emlx", with: "")
+            guard let sourceID = Int64(stem) else { continue }
+            // A full file wins over an already-recorded partial for the same id.
+            if isPartial, byID[sourceID] != nil { continue }
+            let values = try? item.resourceValues(forKeys: Set(keys))
+            let modTime = values?.contentModificationDate?.timeIntervalSinceReferenceDate ?? 0
+            let size = values?.fileSize ?? 0
+            byID[sourceID] = EmlxFile(sourceID: sourceID, url: item,
+                                      fingerprint: "\(modTime)-\(size)")
+        }
+        return Array(byID.values)
+    }
 
     /// Scans once and returns a map ROWID -> file URL.
     public static func index(accountDirectory: URL) -> [Int64: URL] {
