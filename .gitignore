@@ -35,3 +35,7 @@ secrets/
 
 # Eval outputs
 Tests/Evals/results/
+
+# Local tooling (Claude Code worktrees + machine-local settings)
+.claude/worktrees/
+.claude/settings.local.json
