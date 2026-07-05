@@ -31,6 +31,14 @@ public enum Defaults {
     public static let sessionTurnCap = 3
 
     // MARK: Ingestion
+    /// Apple Mail data root; each account lives in a UUID-named subdirectory,
+    /// with the shared index/plist under `MailData`.
+    public static let mailRoot = URL(
+        fileURLWithPath: NSString(string: "~/Library/Mail/V10").expandingTildeInPath,
+        isDirectory: true)
+    /// Maps account UUIDs to names/emails for the account picker (MailAccounts).
+    public static let accountsPlistURL =
+        mailRoot.appendingPathComponent("MailData/Accounts.plist")
     public static let envelopeIndexPath =
         NSString(string: "~/Library/Mail/V10/MailData/Envelope Index").expandingTildeInPath
     /// Add to envelope-index date_sent/date_received for Unix time.

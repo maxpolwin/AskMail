@@ -1,7 +1,6 @@
 import AppKit
 import AskMailCore
 import SwiftUI
-import UniformTypeIdentifiers
 
 struct SettingsView: View {
     @ObservedObject private var settings = SettingsStore.shared
@@ -12,16 +11,28 @@ struct SettingsView: View {
     @State private var showRebuildConfirmation = false
     @State private var vectorizeProgress: IngestProgress?
     @State private var statusMessage = ""
+    @State private var accounts: [MailAccount] = []
 
     var body: some View {
         Form {
             Section("Mailbox") {
-                HStack {
-                    TextField("Account mail directory", text: $settings.accountDirectory)
-                        .truncationMode(.middle)
-                    Button("Choose\u{2026}") { chooseAccountDirectory() }
+                if accounts.isEmpty {
+                    Text("No Apple Mail accounts found under ~/Library/Mail/V10. Make sure Mail is set up and AskMail has Full Disk Access, then reload.")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                } else {
+                    Picker("Account", selection: $settings.accountID) {
+                        Text("Select an account\u{2026}").tag("")
+                        ForEach(accounts) { account in
+                            Text(account.label).tag(account.id)
+                        }
+                    }
+                    .onChange(of: settings.accountID) { _, newID in
+                        settings.accountEmail = accounts.first { $0.id == newID }?.email ?? ""
+                    }
                 }
-                Text("Select the account folder under ~/Library/Mail/V10. Changing it scopes future ingestion to that account only.")
+                Button("Reload accounts") { loadAccounts() }
+                Text("Pick the Apple Mail account to index. Changing it scopes future ingestion to that account only.")
                     .font(.caption)
                     .foregroundStyle(.secondary)
             }
@@ -86,6 +97,7 @@ struct SettingsView: View {
         }
         .formStyle(.grouped)
         .frame(width: 520, height: 640)
+        .onAppear { loadAccounts() }
         .alert("Copy debug logs?", isPresented: $showCopyLogsWarning) {
             Button("Copy", role: .destructive) {
                 NSPasteboard.general.clearContents()
@@ -135,23 +147,33 @@ struct SettingsView: View {
         }
     }
 
-    private func chooseAccountDirectory() {
-        let panel = NSOpenPanel()
-        panel.canChooseDirectories = true
-        panel.canChooseFiles = false
-        panel.directoryURL = URL(fileURLWithPath: NSString(string: "~/Library/Mail/V10").expandingTildeInPath)
-        if panel.runModal() == .OK, let url = panel.url {
-            settings.accountDirectory = url.path
+    /// Discovers Apple Mail accounts for the picker. Keeps a previously chosen
+    /// account visible even if its directory is gone (so the picker never shows
+    /// a blank selection), and back-fills the email for a migrated selection.
+    private func loadAccounts() {
+        var found = MailAccountsReader.list()
+        let selected = settings.accountID
+        if !selected.isEmpty, !found.contains(where: { $0.id == selected }) {
+            found.append(MailAccount(
+                id: selected,
+                email: settings.accountEmail,
+                displayName: "",
+                directory: Defaults.mailRoot.appendingPathComponent(selected, isDirectory: true)))
         }
+        if settings.accountEmail.isEmpty,
+           let match = found.first(where: { $0.id == selected }), !match.email.isEmpty {
+            settings.accountEmail = match.email
+        }
+        accounts = found
     }
 
     /// Manual trigger: runs regardless of power state (FR-6).
     private func vectorizeNow() {
-        let directory = settings.accountDirectory
-        guard !directory.isEmpty else {
-            statusMessage = "Select an account mail directory first."
+        guard let directory = settings.accountDirectoryURL else {
+            statusMessage = "Select an account first."
             return
         }
+        let storageKey = settings.accountStorageKey
         vectorizeProgress = IngestProgress(processed: 0, total: 0)
         statusMessage = ""
         Task {
@@ -159,8 +181,8 @@ struct SettingsView: View {
                 let store = try SQLiteStore(path: SettingsStore.databasePath)
                 let ingestor = MailboxIngestor(store: store,
                                                embedder: OllamaEmbedder(),
-                                               account: directory)
-                let files = EmlxLocator.index(accountDirectory: URL(fileURLWithPath: directory))
+                                               account: storageKey)
+                let files = EmlxLocator.index(accountDirectory: directory)
                     .values.sorted { $0.path < $1.path }
                 let summary = try await ingestor.ingest(files: files) { progress in
                     Task { @MainActor in vectorizeProgress = progress }

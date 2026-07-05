@@ -22,8 +22,14 @@ final class SettingsStore: ObservableObject {
     @Published var answerTokenLimit: Int {
         didSet { defaults.set(answerTokenLimit, forKey: "answerTokenLimit") }
     }
-    @Published var accountDirectory: String {
-        didSet { defaults.set(accountDirectory, forKey: "accountDirectory") }
+    /// On-disk id (UUID directory name) of the selected Apple Mail account.
+    @Published var accountID: String {
+        didSet { defaults.set(accountID, forKey: "accountID") }
+    }
+    /// Resolved email for the selected account; written to the store's `account`
+    /// column and used to label the current selection.
+    @Published var accountEmail: String {
+        didSet { defaults.set(accountEmail, forKey: "accountEmail") }
     }
     @Published var lastVectorized: Date? {
         didSet { defaults.set(lastVectorized, forKey: "lastVectorized") }
@@ -42,12 +48,33 @@ final class SettingsStore: ObservableObject {
         contextTokenLimit = contextLimit > 0 ? contextLimit : Defaults.contextTokenLimit
         let answerLimit = defaults.integer(forKey: "answerTokenLimit")
         answerTokenLimit = answerLimit > 0 ? answerLimit : Defaults.answerTokenLimit
-        accountDirectory = defaults.string(forKey: "accountDirectory") ?? ""
+        accountID = defaults.string(forKey: "accountID") ?? ""
+        accountEmail = defaults.string(forKey: "accountEmail") ?? ""
         lastVectorized = defaults.object(forKey: "lastVectorized") as? Date
         let keyCode = defaults.object(forKey: "hotkeyKeyCode") as? Int
         hotkeyKeyCode = keyCode ?? kVK_Space
         let modifiers = defaults.object(forKey: "hotkeyModifiers") as? Int
         hotkeyModifiers = modifiers ?? (controlKey | optionKey)
+
+        // Migrate the pre-picker path setting: an account directory's last path
+        // component is its id. (didSet doesn't fire during init, so persist here.)
+        if accountID.isEmpty,
+           let legacyPath = defaults.string(forKey: "accountDirectory"), !legacyPath.isEmpty {
+            accountID = URL(fileURLWithPath: legacyPath).lastPathComponent
+            defaults.set(accountID, forKey: "accountID")
+            defaults.removeObject(forKey: "accountDirectory")
+        }
+    }
+
+    /// Filesystem directory of the selected account, or nil if none is chosen.
+    var accountDirectoryURL: URL? {
+        accountID.isEmpty ? nil : Defaults.mailRoot.appendingPathComponent(accountID, isDirectory: true)
+    }
+
+    /// Value written to each ingested message's `account` column: the email when
+    /// known, else the on-disk id.
+    var accountStorageKey: String {
+        accountEmail.isEmpty ? accountID : accountEmail
     }
 
     /// Snapshot for one query (FR-9: settings changes apply on the next query).
