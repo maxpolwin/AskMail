@@ -23,7 +23,10 @@ final class PanelController {
         panel.hidesOnDeactivate = false
         panel.isReleasedWhenClosed = false
         panel.collectionBehavior = [.canJoinAllSpaces, .fullScreenAuxiliary]
-        panel.appearance = NSAppearance(named: .darkAqua)  // dark primary theme
+        // Follow the system Light/Dark setting; AskView's .ultraThinMaterial is
+        // the frosted surface, so keep the window itself clear and non-opaque.
+        panel.isOpaque = false
+        panel.backgroundColor = .clear
         panel.contentView = NSHostingView(rootView: AskView(model: viewModel))
     }
 

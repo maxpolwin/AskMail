@@ -44,9 +44,21 @@ struct SettingsView: View {
                     } ?? "never")
                 }
                 if let progress = vectorizeProgress {
-                    ProgressView(value: Double(progress.processed),
-                                 total: Double(max(progress.total, 1))) {
-                        Text("Vectorizing \(progress.processed)/\(progress.total)")
+                    VStack(alignment: .leading, spacing: 6) {
+                        if progress.total == 0 {
+                            // File count not known yet: indeterminate, same hairline
+                            // language as the ask panel's "thinking" state.
+                            Text("Preparing\u{2026}")
+                                .font(.caption)
+                                .foregroundStyle(.secondary)
+                            AnimatedHairline(active: true)
+                        } else {
+                            Text("Vectorizing \(progress.processed)/\(progress.total)")
+                                .font(.caption)
+                                .foregroundStyle(.secondary)
+                            ProgressView(value: Double(progress.processed),
+                                         total: Double(max(progress.total, 1)))
+                        }
                     }
                 }
                 HStack {
@@ -96,7 +108,10 @@ struct SettingsView: View {
             }
         }
         .formStyle(.grouped)
+        .scrollContentBackground(.hidden)   // let the frosted surface show through
         .frame(width: 520, height: 640)
+        .background(.ultraThinMaterial)      // same frosted family as the ask panel
+        .tint(Theme.accent)                  // one shared violet accent
         .onAppear { loadAccounts() }
         .alert("Copy debug logs?", isPresented: $showCopyLogsWarning) {
             Button("Copy", role: .destructive) {
@@ -213,4 +228,12 @@ struct SettingsView: View {
             statusMessage = "Delete failed: \(error)"
         }
     }
+}
+
+#Preview("Settings \u{2014} light") {
+    SettingsView().preferredColorScheme(.light)
+}
+
+#Preview("Settings \u{2014} dark") {
+    SettingsView().preferredColorScheme(.dark)
 }

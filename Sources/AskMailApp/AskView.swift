@@ -78,12 +78,15 @@ struct AskView: View {
 
     var body: some View {
         VStack(alignment: .leading, spacing: 12) {
-            TextField("Ask your email\u{2026}", text: $model.question)
-                .textFieldStyle(.plain)
-                .font(.system(size: 18))
-                .padding(12)
-                .background(.white.opacity(0.06), in: RoundedRectangle(cornerRadius: 10))
-                .onSubmit { model.submit() }
+            VStack(alignment: .leading, spacing: 10) {
+                TextField("Ask your email\u{2026}", text: $model.question)
+                    .textFieldStyle(.plain)
+                    .font(.system(size: 21, weight: .light))  // ephemeral, light weight
+                    .foregroundStyle(.primary)                // adapts light/dark
+                    .onSubmit { model.submit() }
+
+                AnimatedHairline(active: model.isStreaming)
+            }
 
             if let warning = model.warning {
                 Label(warning, systemImage: "exclamationmark.triangle")
@@ -98,10 +101,8 @@ struct AskView: View {
                             .font(.system(size: 14))
                             .textSelection(.enabled)
                             .frame(maxWidth: .infinity, alignment: .leading)
-                    } else if model.isStreaming {
-                        ProgressView()
-                            .frame(maxWidth: .infinity, alignment: .center)
                     }
+                    // Streaming progress is signaled by AnimatedHairline, not a spinner.
 
                     if !model.sources.isEmpty {
                         Divider()
@@ -131,4 +132,20 @@ struct AskView: View {
             }
         }
     }
+}
+
+#Preview("Light \u{2014} streaming") {
+    let model = AskViewModel()
+    model.question = "when is the Henderson contract due?"
+    model.isStreaming = true  // hairline sweeps
+    return AskView(model: model)
+        .preferredColorScheme(.light)
+}
+
+#Preview("Dark \u{2014} answered") {
+    let model = AskViewModel()
+    model.question = "when is the Henderson contract due?"
+    model.answer = "The Henderson contract is due Fri, Jul 11 \u{2014} Legal flagged a 3-day review window."
+    return AskView(model: model)
+        .preferredColorScheme(.dark)
 }
