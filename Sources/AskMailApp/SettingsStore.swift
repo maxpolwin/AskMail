@@ -40,6 +40,11 @@ final class SettingsStore: ObservableObject {
     @Published var hotkeyModifiers: Int {
         didSet { defaults.set(hotkeyModifiers, forKey: "hotkeyModifiers") }
     }
+    /// Human-readable label for the hotkey's key (e.g. "Space", "K", "\u{2192}"),
+    /// captured in the shortcut recorder so display stays layout-correct.
+    @Published var hotkeyKeyLabel: String {
+        didSet { defaults.set(hotkeyKeyLabel, forKey: "hotkeyKeyLabel") }
+    }
 
     private init() {
         provider = ProviderChoice(rawValue: defaults.string(forKey: "provider") ?? "") ?? .ollamaLocal
@@ -55,6 +60,7 @@ final class SettingsStore: ObservableObject {
         hotkeyKeyCode = keyCode ?? kVK_Space
         let modifiers = defaults.object(forKey: "hotkeyModifiers") as? Int
         hotkeyModifiers = modifiers ?? (controlKey | optionKey)
+        hotkeyKeyLabel = defaults.string(forKey: "hotkeyKeyLabel") ?? "Space"
 
         // Migrate the pre-picker path setting: an account directory's last path
         // component is its id. (didSet doesn't fire during init, so persist here.)

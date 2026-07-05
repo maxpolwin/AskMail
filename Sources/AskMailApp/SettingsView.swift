@@ -1,5 +1,6 @@
 import AppKit
 import AskMailCore
+import Carbon.HIToolbox
 import SwiftUI
 
 struct SettingsView: View {
@@ -37,6 +38,22 @@ struct SettingsView: View {
                 }
                 Button("Reload accounts") { loadAccounts() }
                 Text("Pick the Apple Mail account to index. Changing it scopes future ingestion to that account only.")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+            }
+
+            Section("Shortcut") {
+                LabeledContent("Open AskMail") {
+                    ShortcutField(keyCode: $settings.hotkeyKeyCode,
+                                  carbonModifiers: $settings.hotkeyModifiers,
+                                  label: $settings.hotkeyKeyLabel)
+                }
+                Button("Reset to \u{2303}\u{2325}Space") {
+                    settings.hotkeyKeyCode = kVK_Space
+                    settings.hotkeyModifiers = controlKey | optionKey
+                    settings.hotkeyKeyLabel = "Space"
+                }
+                Text("Click the shortcut, then press a new combination. Include \u{2318}, \u{2325}, \u{2303}, or \u{21E7}.")
                     .font(.caption)
                     .foregroundStyle(.secondary)
             }

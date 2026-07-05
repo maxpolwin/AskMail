@@ -1,9 +1,11 @@
+import AskMailCore
 import Carbon.HIToolbox
 import Foundation
 
 /// Global hotkey via Carbon RegisterEventHotKey. Default is
 /// Control+Option+Space; deliberately not Cmd+B (Bold conflict). Verified
 /// against FR-1 on a German layout by using key codes, not characters.
+/// The binding can be changed at runtime from Settings via `register`.
 final class HotkeyManager {
     private var hotKeyRef: EventHotKeyRef?
     private var eventHandler: EventHandlerRef?
@@ -24,9 +26,22 @@ final class HotkeyManager {
             return noErr
         }, 1, &eventType, selfPointer, &eventHandler)
 
+        register(keyCode: keyCode, modifiers: modifiers)
+    }
+
+    /// (Re)registers the global hotkey, replacing any previous binding. Safe to
+    /// call whenever the user changes the shortcut in Settings.
+    func register(keyCode: UInt32, modifiers: UInt32) {
+        if let hotKeyRef {
+            UnregisterEventHotKey(hotKeyRef)
+            self.hotKeyRef = nil
+        }
         let hotKeyID = EventHotKeyID(signature: OSType(0x41534B4D) /* 'ASKM' */, id: 1)
-        RegisterEventHotKey(keyCode, modifiers, hotKeyID,
-                            GetApplicationEventTarget(), 0, &hotKeyRef)
+        let status = RegisterEventHotKey(keyCode, modifiers, hotKeyID,
+                                         GetApplicationEventTarget(), 0, &hotKeyRef)
+        if status != noErr {
+            RollingLog.shared.log("hotkey registration failed (status \(status)); the combo may already be in use")
+        }
     }
 
     deinit {
