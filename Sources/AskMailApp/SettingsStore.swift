@@ -34,6 +34,14 @@ final class SettingsStore: ObservableObject {
     @Published var lastVectorized: Date? {
         didSet { defaults.set(lastVectorized, forKey: "lastVectorized") }
     }
+    /// Verbosity of `RollingLog`. Changing it takes effect immediately, no
+    /// restart needed (FR-9), by also updating the shared log's threshold.
+    @Published var logLevel: RollingLog.LogLevel {
+        didSet {
+            defaults.set(logLevel.rawValue, forKey: "logLevel")
+            RollingLog.shared.currentMinLevel = logLevel
+        }
+    }
     @Published var hotkeyKeyCode: Int {
         didSet { defaults.set(hotkeyKeyCode, forKey: "hotkeyKeyCode") }
     }
@@ -56,6 +64,8 @@ final class SettingsStore: ObservableObject {
         accountID = defaults.string(forKey: "accountID") ?? ""
         accountEmail = defaults.string(forKey: "accountEmail") ?? ""
         lastVectorized = defaults.object(forKey: "lastVectorized") as? Date
+        let storedLogLevel = defaults.object(forKey: "logLevel") as? Int
+        logLevel = storedLogLevel.flatMap(RollingLog.LogLevel.init(rawValue:)) ?? .debug
         let keyCode = defaults.object(forKey: "hotkeyKeyCode") as? Int
         hotkeyKeyCode = keyCode ?? kVK_Space
         let modifiers = defaults.object(forKey: "hotkeyModifiers") as? Int
@@ -70,6 +80,8 @@ final class SettingsStore: ObservableObject {
             defaults.set(accountID, forKey: "accountID")
             defaults.removeObject(forKey: "accountDirectory")
         }
+
+        RollingLog.shared.currentMinLevel = logLevel
     }
 
     /// Filesystem directory of the selected account, or nil if none is chosen.

@@ -27,9 +27,26 @@ final class Vectorizer: ObservableObject {
 
     @Published private(set) var progress: IngestProgress?
     @Published private(set) var status: String = ""
+    /// Files that failed their most recent ingest attempt; drives the
+    /// Settings "Retry N failed…" button.
+    @Published private(set) var failedCount: Int = 0
     private var isRunning = false
 
     private let settings = SettingsStore.shared
+
+    init() {
+        refreshFailedCount()
+    }
+
+    /// Refreshes `failedCount` from disk. Call after any run and whenever
+    /// Settings appears, so a rebuild ("Delete & rebuild…") is reflected too.
+    func refreshFailedCount() {
+        guard let store = try? SQLiteStore(path: SettingsStore.databasePath) else {
+            failedCount = 0
+            return
+        }
+        failedCount = (try? store.failedIngestCount()) ?? 0
+    }
 
     /// Runs an incremental vectorization. Manual runs report problems (no
     /// account, etc.) via `status`; scheduled runs stay silent and skip when off
@@ -55,6 +72,7 @@ final class Vectorizer: ObservableObject {
         defer {
             isRunning = false
             progress = nil
+            refreshFailedCount()
         }
 
         let storageKey = settings.accountStorageKey
@@ -75,7 +93,7 @@ final class Vectorizer: ObservableObject {
             status = "Done: \(summary.ingested) new, \(summary.skipped) unchanged, \(summary.failed) failed."
             RollingLog.shared.log(
                 "\(trigger.rawValue) vectorize done: \(summary.ingested) new, "
-                + "\(summary.skipped) unchanged, \(summary.failed) failed")
+                + "\(summary.skipped) unchanged, \(summary.failed) failed", level: .info)
             return summary
         } catch is IngestError {
             // Backend went unreachable mid-run; already-done work is saved and
@@ -84,8 +102,67 @@ final class Vectorizer: ObservableObject {
             status = "Stopped: Ollama isn\u{2019}t running. Start it (\u{2018}ollama serve\u{2019}), then Vectorize now \u{2014} it resumes where it left off."
             return nil
         } catch {
-            RollingLog.shared.log("\(trigger.rawValue) vectorize failed: \(error)")
+            RollingLog.shared.log("\(trigger.rawValue) vectorize failed: \(error)", level: .error)
             status = "Vectorization failed: \(error)"
+            return nil
+        }
+    }
+
+    /// Re-attempts only the files that failed their last ingest, instead of
+    /// re-scanning and re-embedding the whole mailbox. Shares `run`'s
+    /// single-flight guard so a retry can never overlap a scheduled/manual run.
+    @discardableResult
+    func retryFailed() async -> IngestSummary? {
+        guard !isRunning else {
+            status = "A vectorization run is already in progress."
+            return nil
+        }
+        guard let directory = settings.accountDirectoryURL else {
+            status = "Select an account first."
+            return nil
+        }
+
+        isRunning = true
+        progress = IngestProgress(processed: 0, total: 0)
+        status = ""
+        defer {
+            isRunning = false
+            progress = nil
+            refreshFailedCount()
+        }
+
+        let storageKey = settings.accountStorageKey
+        do {
+            let store = try SQLiteStore(path: SettingsStore.databasePath)
+            let failedIDs = Set(try store.failedIngestSourceIDs())
+            guard !failedIDs.isEmpty else {
+                status = "No failed emails to retry."
+                return nil
+            }
+            let ingestor = MailboxIngestor(store: store,
+                                           embedder: OllamaEmbedder(),
+                                           account: storageKey)
+            let files = EmlxLocator.scan(accountDirectory: directory)
+                .filter { failedIDs.contains($0.sourceID) }
+                .sorted { $0.sourceID < $1.sourceID }
+            let summary = try await ingestor.ingestNew(files) { update in
+                Task { @MainActor in
+                    let v = Vectorizer.shared
+                    if v.isRunning { v.progress = update }
+                }
+            }
+            settings.lastVectorized = Date()
+            status = "Retried \(files.count): \(summary.ingested) now ok, \(summary.failed) still failing."
+            RollingLog.shared.log(
+                "retry vectorize done: \(summary.ingested) now ok, \(summary.failed) still failing", level: .info)
+            return summary
+        } catch is IngestError {
+            RollingLog.shared.log("retry vectorize stopped: Ollama unreachable", level: .error)
+            status = "Stopped: Ollama isn\u{2019}t running. Start it (\u{2018}ollama serve\u{2019}), then retry \u{2014} it resumes where it left off."
+            return nil
+        } catch {
+            RollingLog.shared.log("retry vectorize failed: \(error)", level: .error)
+            status = "Retry failed: \(error)"
             return nil
         }
     }

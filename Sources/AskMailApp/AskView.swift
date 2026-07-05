@@ -42,12 +42,12 @@ final class AskViewModel: ObservableObject {
                 // (docs/prompt-contract.md §6).
                 let rendered = CitationRenderer.render(answer: raw, sourceMap: result.sourceMap)
                 for dropped in rendered.droppedMarkers {
-                    RollingLog.shared.log("citation marker [\(dropped)] had no source; dropped")
+                    RollingLog.shared.log("citation marker [\(dropped)] had no source; dropped", level: .debug)
                 }
                 answer = rendered.text
                 sources = rendered.sources
             } catch {
-                RollingLog.shared.log("query failed: \(error)")
+                RollingLog.shared.log("query failed: \(error)", level: .error)
                 warning = "Query failed: \(error)"
             }
             isStreaming = false

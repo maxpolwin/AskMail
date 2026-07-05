@@ -40,7 +40,7 @@ final class HotkeyManager {
         let status = RegisterEventHotKey(keyCode, modifiers, hotKeyID,
                                          GetApplicationEventTarget(), 0, &hotKeyRef)
         if status != noErr {
-            RollingLog.shared.log("hotkey registration failed (status \(status)); the combo may already be in use")
+            RollingLog.shared.log("hotkey registration failed (status \(status)); the combo may already be in use", level: .error)
         }
     }
 

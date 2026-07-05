@@ -100,6 +100,17 @@ public final class SQLiteStore {
           fingerprint TEXT NOT NULL
         );
         """)
+        // Keyed by the same source_id as ingest_state, so a retry can re-scan
+        // the account directory for just these ROWIDs and feed them through
+        // the normal fingerprint-recording path (FR-5 retry).
+        try execute("""
+        CREATE TABLE IF NOT EXISTS ingest_failures(
+          source_id INTEGER PRIMARY KEY,
+          path TEXT NOT NULL,
+          error TEXT NOT NULL,
+          failed_at INTEGER NOT NULL
+        );
+        """)
     }
 
     // MARK: Messages & chunks
@@ -291,6 +302,49 @@ public final class SQLiteStore {
         }
     }
 
+    // MARK: Ingest failures (retry)
+
+    /// Records (or updates) a file that failed to ingest, so a later retry
+    /// can target just the files that need it instead of the whole mailbox.
+    public func recordIngestFailure(sourceID: Int64, path: String, error: String,
+                                    at date: Date = Date()) throws {
+        lock.lock(); defer { lock.unlock() }
+        try run("""
+        INSERT INTO ingest_failures(source_id, path, error, failed_at) VALUES (?, ?, ?, ?)
+        ON CONFLICT(source_id) DO UPDATE SET
+          path = excluded.path, error = excluded.error, failed_at = excluded.failed_at
+        """) { statement in
+            sqlite3_bind_int64(statement, 1, sourceID)
+            bind(statement, 2, path)
+            bind(statement, 3, error)
+            sqlite3_bind_int64(statement, 4, Int64(date.timeIntervalSince1970))
+        }
+    }
+
+    /// Clears a file's failure record once it ingests successfully.
+    public func clearIngestFailure(sourceID: Int64) throws {
+        lock.lock(); defer { lock.unlock() }
+        try run("DELETE FROM ingest_failures WHERE source_id = ?") { statement in
+            sqlite3_bind_int64(statement, 1, sourceID)
+        }
+    }
+
+    /// Source IDs of files that failed on their most recent ingest attempt,
+    /// oldest failure first.
+    public func failedIngestSourceIDs() throws -> [Int64] {
+        lock.lock(); defer { lock.unlock() }
+        var ids: [Int64] = []
+        try query("SELECT source_id FROM ingest_failures ORDER BY failed_at") { _ in
+        } row: { statement in
+            ids.append(sqlite3_column_int64(statement, 0))
+        }
+        return ids
+    }
+
+    public func failedIngestCount() throws -> Int {
+        try count("SELECT COUNT(*) FROM ingest_failures")
+    }
+
     // MARK: Maintenance (FR-8 delete & rebuild)
 
     /// Wipes all content and resets the watermark. The next scheduled or
@@ -298,6 +352,7 @@ public final class SQLiteStore {
     public func deleteAll() throws {
         lock.lock(); defer { lock.unlock() }
         try run("DELETE FROM messages") { _ in }   // chunks cascade, FTS via trigger
+        try run("DELETE FROM ingest_failures") { _ in }
         try run("DELETE FROM meta") { _ in }
         try run("DELETE FROM ingest_state") { _ in }
     }

@@ -287,10 +287,10 @@ public enum ChatEvent: Sendable, Equatable {
 public struct ProviderRouter: Sendable {
     public var primary: ChatProvider
     public var fallback: ChatProvider?
-    public var log: @Sendable (String) -> Void
+    public var log: @Sendable (String, RollingLog.LogLevel) -> Void
 
     public init(primary: ChatProvider, fallback: ChatProvider?,
-                log: @escaping @Sendable (String) -> Void = { RollingLog.shared.log($0) }) {
+                log: @escaping @Sendable (String, RollingLog.LogLevel) -> Void = { RollingLog.shared.log($0, level: $1) }) {
         self.primary = primary
         self.fallback = fallback
         self.log = log
@@ -301,29 +301,29 @@ public struct ProviderRouter: Sendable {
             let task = Task {
                 do {
                     do {
-                        log("provider=\(primary.name) start")
+                        log("provider=\(primary.name) start", .debug)
                         for try await token in primary.stream(request) {
                             continuation.yield(.token(token))
                         }
-                        log("provider=\(primary.name) done")
+                        log("provider=\(primary.name) done", .debug)
                         continuation.yield(.done)
                         continuation.finish()
                         return
                     } catch {
                         guard let fallback, fallback.name != primary.name else { throw error }
                         // Full error body goes to the log; the UI gets a short warning.
-                        log("provider=\(primary.name) FAILED, falling back to \(fallback.name). error=\(error)")
+                        log("provider=\(primary.name) FAILED, falling back to \(fallback.name). error=\(error)", .error)
                         continuation.yield(.fallback(provider: fallback.name,
                                                      error: String(describing: error)))
                         for try await token in fallback.stream(request) {
                             continuation.yield(.token(token))
                         }
-                        log("provider=\(fallback.name) done (fallback)")
+                        log("provider=\(fallback.name) done (fallback)", .info)
                         continuation.yield(.done)
                         continuation.finish()
                     }
                 } catch {
-                    log("provider stream failed terminally: \(error)")
+                    log("provider stream failed terminally: \(error)", .error)
                     continuation.finish(throwing: error)
                 }
             }

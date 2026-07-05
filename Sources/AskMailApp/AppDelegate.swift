@@ -14,7 +14,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private var cancellables = Set<AnyCancellable>()
 
     func applicationDidFinishLaunching(_ notification: Notification) {
-        RollingLog.shared.log("app launched")
+        RollingLog.shared.log("app launched", level: .info)
         let panel = PanelController()
         self.panel = panel
 

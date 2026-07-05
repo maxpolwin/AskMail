@@ -2,6 +2,7 @@ import AppKit
 import AskMailCore
 import Carbon.HIToolbox
 import SwiftUI
+import UniformTypeIdentifiers
 
 struct SettingsView: View {
     @ObservedObject private var settings = SettingsStore.shared
@@ -9,7 +10,8 @@ struct SettingsView: View {
     @State private var ollamaCloudKey = ""
     @State private var mistralKey = ""
     @State private var keysStatus = ""
-    @State private var showCopyLogsWarning = false
+    @State private var showExportLogsWarning = false
+    @State private var logsStatus = ""
     @State private var showRebuildConfirmation = false
     @State private var statusMessage = ""
     @State private var launchAtLogin = LoginItem.isEnabled
@@ -94,6 +96,12 @@ struct SettingsView: View {
                 HStack {
                     Button("Vectorize now") { Task { await vectorizer.run(.manual) } }
                         .disabled(vectorizer.progress != nil)
+                    if vectorizer.failedCount > 0 {
+                        Button("Retry \(vectorizer.failedCount) failed\u{2026}") {
+                            Task { await vectorizer.retryFailed() }
+                        }
+                        .disabled(vectorizer.progress != nil)
+                    }
                     Button("Delete & rebuild\u{2026}", role: .destructive) {
                         showRebuildConfirmation = true
                     }
@@ -140,7 +148,18 @@ struct SettingsView: View {
             }
 
             Section("Debug") {
-                Button("Copy logs (last 12 h)") { showCopyLogsWarning = true }
+                Picker("Log level", selection: $settings.logLevel) {
+                    ForEach(RollingLog.LogLevel.allCases, id: \.self) { level in
+                        Text(level.displayName).tag(level)
+                    }
+                }
+                Text("Debug is the most verbose and includes retrieval scores and provider timing. Errors only keeps the log small.")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                Button("Export logs (.md)\u{2026}") { showExportLogsWarning = true }
+                if !logsStatus.isEmpty {
+                    Text(logsStatus).font(.caption).foregroundStyle(.secondary)
+                }
             }
         }
         .formStyle(.grouped)
@@ -151,15 +170,13 @@ struct SettingsView: View {
         .onAppear {
             loadAccounts()
             launchAtLogin = LoginItem.isEnabled   // reflect external changes
+            vectorizer.refreshFailedCount()
         }
-        .alert("Copy debug logs?", isPresented: $showCopyLogsWarning) {
-            Button("Copy", role: .destructive) {
-                NSPasteboard.general.clearContents()
-                NSPasteboard.general.setString(RollingLog.shared.recentText(), forType: .string)
-            }
+        .alert("Export debug logs?", isPresented: $showExportLogsWarning) {
+            Button("Export\u{2026}", role: .destructive) { exportLogs() }
             Button("Cancel", role: .cancel) {}
         } message: {
-            Text("Logs contain your questions, answers, and email excerpts from the last 12 hours. Only share them with someone you trust.")
+            Text("Logs contain your questions, answers, and email excerpts from the last 12 hours. Only share the file with someone you trust.")
         }
         .confirmationDialog("Delete the vector database and rebuild from scratch?",
                             isPresented: $showRebuildConfirmation) {
@@ -182,7 +199,7 @@ struct SettingsView: View {
                 clear()
             } else {
                 failed.append(label)
-                RollingLog.shared.log("keychain write FAILED for service \(service)")
+                RollingLog.shared.log("keychain write FAILED for service \(service)", level: .error)
             }
         }
 
@@ -254,11 +271,35 @@ struct SettingsView: View {
         do {
             try LoginItem.setEnabled(enabled)
         } catch {
-            RollingLog.shared.log("login item change failed: \(error)")
+            RollingLog.shared.log("login item change failed: \(error)", level: .error)
             statusMessage = "Couldn't \(enabled ? "enable" : "disable") open-at-login: \(error.localizedDescription)"
             launchAtLogin = LoginItem.isEnabled
         }
     }
+
+    /// Writes the retained log window straight to a `.md` file the user
+    /// picks, so sharing a bug report no longer requires copy-pasting out of
+    /// the clipboard into an editor (FR-11).
+    private func exportLogs() {
+        let panel = NSSavePanel()
+        panel.title = "Export Debug Logs"
+        panel.nameFieldStringValue = "AskMail-Debug-Log-\(Self.exportFilenameFormatter.string(from: Date())).md"
+        panel.allowedContentTypes = [UTType(filenameExtension: "md") ?? .plainText]
+        panel.canCreateDirectories = true
+        guard panel.runModal() == .OK, let url = panel.url else { return }
+        do {
+            try RollingLog.shared.markdownDocument().write(to: url, atomically: true, encoding: .utf8)
+            logsStatus = "Exported to \(url.lastPathComponent)."
+        } catch {
+            logsStatus = "Export failed: \(error)"
+        }
+    }
+
+    private static let exportFilenameFormatter: DateFormatter = {
+        let formatter = DateFormatter()
+        formatter.dateFormat = "yyyy-MM-dd-HHmmss"
+        return formatter
+    }()
 
     private func deleteAndRebuild() {
         do {
@@ -266,7 +307,8 @@ struct SettingsView: View {
             try store.deleteAll()
             settings.lastVectorized = nil
             statusMessage = "Database wiped. Run \"Vectorize now\" to rebuild."
-            RollingLog.shared.log("vector DB deleted by user; watermark reset")
+            RollingLog.shared.log("vector DB deleted by user; watermark reset", level: .info)
+            vectorizer.refreshFailedCount()
         } catch {
             statusMessage = "Delete failed: \(error)"
         }

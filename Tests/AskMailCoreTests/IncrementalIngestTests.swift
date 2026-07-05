@@ -23,7 +23,7 @@ final class IncrementalIngestTests: XCTestCase {
     func testFirstRunIngestsAllThenSkipsUnchanged() async throws {
         let store = try SQLiteStore.inMemory()
         let ingestor = MailboxIngestor(store: store, embedder: StubEmbedder(),
-                                       account: "test", log: { _ in })
+                                       account: "test", log: { _, _ in })
 
         let first = try await ingestor.ingestNew(entries(fingerprint: "v1"))
         XCTAssertEqual(first.ingested, 3)
@@ -43,7 +43,7 @@ final class IncrementalIngestTests: XCTestCase {
     func testChangedFingerprintReingestsOnlyThatFile() async throws {
         let store = try SQLiteStore.inMemory()
         let ingestor = MailboxIngestor(store: store, embedder: StubEmbedder(),
-                                       account: "test", log: { _ in })
+                                       account: "test", log: { _, _ in })
         _ = try await ingestor.ingestNew(entries(fingerprint: "v1"))
         let chunksBefore = try store.chunkCount()
 
@@ -62,7 +62,7 @@ final class IncrementalIngestTests: XCTestCase {
         let store = try SQLiteStore.inMemory()
         let embedder = UnreachableEmbedder()
         let ingestor = MailboxIngestor(store: store, embedder: embedder,
-                                       account: "test", log: { _ in })
+                                       account: "test", log: { _, _ in })
 
         // 10 files, but the backend refuses every connection: the run must abort
         // after the threshold rather than trying all 10.

@@ -58,13 +58,13 @@ public struct QueryResult: Sendable {
 public final class QueryService: @unchecked Sendable {
     private let store: SQLiteStore
     private let embedder: EmbeddingProvider
-    private let log: (String) -> Void
+    private let log: (String, RollingLog.LogLevel) -> Void
     private let lock = NSLock()
     private var session: [SessionTurn] = []
 
     public init(store: SQLiteStore,
                 embedder: EmbeddingProvider,
-                log: @escaping (String) -> Void = { RollingLog.shared.log($0) }) {
+                log: @escaping (String, RollingLog.LogLevel) -> Void = { RollingLog.shared.log($0, level: $1) }) {
         self.store = store
         self.embedder = embedder
         self.log = log
@@ -85,7 +85,7 @@ public final class QueryService: @unchecked Sendable {
         // 2. Empty-retrieval case (contract §7): never call the LLM with an
         //    empty context.
         guard !chunks.isEmpty else {
-            log("retrieval EMPTY question=\"\(question)\"")
+            log("retrieval EMPTY question=\"\(question)\"", .info)
             let events = AsyncThrowingStream<ChatEvent, Error> { continuation in
                 continuation.yield(.token(Defaults.noMatchMessage))
                 continuation.yield(.done)
@@ -145,7 +145,7 @@ public final class QueryService: @unchecked Sendable {
 
         let fused = Fusion.reciprocalRankFusion([vectorIDs, keywordIDs])
         let aboveFloor = fused.filter { $0.score > settings.relevanceFloor }
-        log("retrieval vector=\(vectorIDs.count) keyword=\(keywordIDs.count) fused=\(fused.count) aboveFloor=\(aboveFloor.count) top=\(aboveFloor.prefix(3).map { "\($0.id):\(String(format: "%.4f", $0.score))" }.joined(separator: ","))")
+        log("retrieval vector=\(vectorIDs.count) keyword=\(keywordIDs.count) fused=\(fused.count) aboveFloor=\(aboveFloor.count) top=\(aboveFloor.prefix(3).map { "\($0.id):\(String(format: "%.4f", $0.score))" }.joined(separator: ","))", .debug)
 
         var candidates = try store.chunks(ids: aboveFloor.map(\.id))
 
@@ -154,7 +154,7 @@ public final class QueryService: @unchecked Sendable {
         // candidates: a wrong-month answer with sources beats a false no-match.
         if let range = DateFilter.unixRange(question: question) {
             let scoped = candidates.filter { range.contains($0.dateUnix) }
-            log("retrieval dateFilter=\(range) kept=\(scoped.count)/\(candidates.count)")
+            log("retrieval dateFilter=\(range) kept=\(scoped.count)/\(candidates.count)", .debug)
             if !scoped.isEmpty { candidates = scoped }
         }
 
@@ -181,8 +181,8 @@ public final class QueryService: @unchecked Sendable {
         }
     }
 
-    private var logSendable: @Sendable (String) -> Void {
+    private var logSendable: @Sendable (String, RollingLog.LogLevel) -> Void {
         let log = self.log
-        return { line in log(line) }
+        return { line, level in log(line, level) }
     }
 }

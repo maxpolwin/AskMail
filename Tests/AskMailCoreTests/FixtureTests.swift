@@ -61,7 +61,7 @@ final class FixtureTests: XCTestCase {
         let ingestor = MailboxIngestor(store: store,
                                        embedder: StubEmbedder(),
                                        account: "test",
-                                       log: { _ in })
+                                       log: { _, _ in })
         let summary = try await ingestor.ingest(files: [
             fixture("msg-0001-plain.emlx"),
             fixture("msg-0002-html-de.emlx"),
@@ -83,6 +83,43 @@ final class FixtureTests: XCTestCase {
         _ = try await ingestor.ingest(files: [fixture("msg-0003-pdf.emlx")])
         XCTAssertEqual(try store.chunkCount(), before)
         XCTAssertEqual(try store.messageCount(), 3)
+    }
+
+    // A failed file is recorded for retry (Settings "Retry N failed…"); once
+    // it's readable, retrying the same source id clears the failure and
+    // records its fingerprint like any other successful ingest (FR-5).
+    func testFailedIngestIsRecordedAndClearsOnRetry() async throws {
+        let store = try SQLiteStore.inMemory()
+        let ingestor = MailboxIngestor(store: store,
+                                       embedder: StubEmbedder(),
+                                       account: "test",
+                                       log: { _, _ in })
+
+        let tempDir = FileManager.default.temporaryDirectory
+            .appendingPathComponent(UUID().uuidString, isDirectory: true)
+        try FileManager.default.createDirectory(at: tempDir, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: tempDir) }
+        let path = tempDir.appendingPathComponent("bad.emlx")
+        let sourceID: Int64 = 99
+
+        try Data("not a valid emlx".utf8).write(to: path)
+        let firstAttempt = try await ingestor.ingestNew([
+            EmlxFile(sourceID: sourceID, url: path, fingerprint: "v1"),
+        ])
+        XCTAssertEqual(firstAttempt.failed, 1)
+        XCTAssertEqual(try store.failedIngestSourceIDs(), [sourceID])
+        XCTAssertEqual(try store.failedIngestCount(), 1)
+        XCTAssertNil(try store.ingestedFingerprint(sourceID: sourceID),
+                     "a failed attempt must not record a fingerprint, so retry always re-attempts it")
+
+        try Data(contentsOf: fixture("msg-0001-plain.emlx")).write(to: path)
+        let retryFiles = try store.failedIngestSourceIDs().map {
+            EmlxFile(sourceID: $0, url: path, fingerprint: "v1")
+        }
+        let retryAttempt = try await ingestor.ingestNew(retryFiles)
+        XCTAssertEqual(retryAttempt.ingested, 1)
+        XCTAssertEqual(try store.failedIngestCount(), 0)
+        XCTAssertEqual(try store.ingestedFingerprint(sourceID: sourceID), "v1")
     }
 }
 

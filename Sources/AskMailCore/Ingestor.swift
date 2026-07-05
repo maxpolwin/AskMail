@@ -45,13 +45,13 @@ public final class MailboxIngestor {
     private let embedder: EmbeddingProvider
     private let chunker: Chunker
     private let account: String
-    private let log: (String) -> Void
+    private let log: (String, RollingLog.LogLevel) -> Void
 
     public init(store: SQLiteStore,
                 embedder: EmbeddingProvider,
                 account: String,
                 chunker: Chunker = Chunker(),
-                log: @escaping (String) -> Void = { RollingLog.shared.log($0) }) {
+                log: @escaping (String, RollingLog.LogLevel) -> Void = { RollingLog.shared.log($0, level: $1) }) {
         self.store = store
         self.embedder = embedder
         self.account = account
@@ -77,7 +77,7 @@ public final class MailboxIngestor {
                 maxDate = max(maxDate, email.dateUnix)
             } catch {
                 failed += 1
-                log("ingest FAILED file=\(file.lastPathComponent) error=\(error)")
+                log("ingest FAILED file=\(file.lastPathComponent) error=\(error)", .error)
             }
             progress?(IngestProgress(processed: index + 1, total: files.count))
         }
@@ -87,7 +87,7 @@ public final class MailboxIngestor {
             try store.setWatermark(maxDate)
             newWatermark = maxDate
         }
-        log("ingest done: \(ingested) ok, \(failed) failed, watermark=\(String(describing: newWatermark))")
+        log("ingest done: \(ingested) ok, \(failed) failed, watermark=\(String(describing: newWatermark))", .info)
         return IngestSummary(ingested: ingested, failed: failed, newWatermark: newWatermark)
     }
 
@@ -100,9 +100,11 @@ public final class MailboxIngestor {
     /// last run, skipping any whose fingerprint the store already recorded.
     /// Each processed file's fingerprint is committed as it succeeds, so a crash
     /// mid-run resumes from where it stopped rather than restarting. Individual
-    /// file failures are logged and skipped; but if the embedding backend goes
-    /// unreachable, the run aborts with `IngestError.embedderUnreachable` rather
-    /// than logging a failure for all remaining messages.
+    /// file failures are logged, recorded for a later retry
+    /// (`SQLiteStore.failedIngestSourceIDs`), and skipped; but if the embedding
+    /// backend goes unreachable, the run aborts with
+    /// `IngestError.embedderUnreachable` rather than logging a failure for all
+    /// remaining messages.
     @discardableResult
     public func ingestNew(_ files: [EmlxFile],
                           progress: (@Sendable (IngestProgress) -> Void)? = nil) async throws -> IngestSummary {
@@ -123,16 +125,19 @@ public final class MailboxIngestor {
                 let email = try EmlxParser.parse(fileURL: file.url)
                 try await ingest(email: email)
                 try store.recordIngested(sourceID: file.sourceID, fingerprint: file.fingerprint)
+                try? store.clearIngestFailure(sourceID: file.sourceID)
                 ingested += 1
                 consecutiveUnreachable = 0
                 maxDate = max(maxDate, email.dateUnix)
             } catch {
                 failed += 1
-                log("ingest FAILED file=\(file.url.lastPathComponent) error=\(error)")
+                log("ingest FAILED file=\(file.url.lastPathComponent) error=\(error)", .error)
+                try? store.recordIngestFailure(sourceID: file.sourceID, path: file.url.path,
+                                               error: String(describing: error))
                 if Self.isConnectionError(error) {
                     consecutiveUnreachable += 1
                     if consecutiveUnreachable >= Self.unreachableAbortThreshold {
-                        log("ingest aborted after \(consecutiveUnreachable) consecutive connection failures; \(ingested) done this run")
+                        log("ingest aborted after \(consecutiveUnreachable) consecutive connection failures; \(ingested) done this run", .error)
                         throw IngestError.embedderUnreachable
                     }
                 } else {
@@ -147,7 +152,7 @@ public final class MailboxIngestor {
             try store.setWatermark(maxDate)
             newWatermark = maxDate
         }
-        log("ingest done (incremental): \(ingested) new, \(skipped) unchanged, \(failed) failed")
+        log("ingest done (incremental): \(ingested) new, \(skipped) unchanged, \(failed) failed", .info)
         return IngestSummary(ingested: ingested, failed: failed, skipped: skipped, newWatermark: newWatermark)
     }
 
@@ -173,7 +178,7 @@ public final class MailboxIngestor {
         }
         for attachment in email.pdfAttachments {
             guard let pdfText = PdfText.extract(data: attachment.data) else {
-                log("ingest skip pdf=\(attachment.filename) (no extractable text)")
+                log("ingest skip pdf=\(attachment.filename) (no extractable text)", .debug)
                 continue
             }
             for text in chunker.chunk(pdfText) {
@@ -181,7 +186,7 @@ public final class MailboxIngestor {
             }
         }
         for skippedName in email.skippedAttachments {
-            log("ingest skip attachment=\(skippedName) (over size cap)")
+            log("ingest skip attachment=\(skippedName) (over size cap)", .debug)
         }
 
         // Embed in batches sized to memory pressure (docs/defaults.md).

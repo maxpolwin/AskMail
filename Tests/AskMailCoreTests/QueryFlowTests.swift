@@ -28,7 +28,7 @@ final class ProviderRouterTests: XCTestCase {
         let local = StubChatProvider(name: "ollama-local", tokens: ["local ", "answer"])
         var logged: [String] = []
         let logLock = NSLock()
-        let router = ProviderRouter(primary: failing, fallback: local) { line in
+        let router = ProviderRouter(primary: failing, fallback: local) { line, _ in
             logLock.lock(); logged.append(line); logLock.unlock()
         }
 
@@ -47,7 +47,7 @@ final class ProviderRouterTests: XCTestCase {
 
     func testNoFallbackWhenPrimarySucceeds() async throws {
         let primary = StubChatProvider(name: "ollama-local", tokens: ["ok"])
-        let router = ProviderRouter(primary: primary, fallback: nil) { _ in }
+        let router = ProviderRouter(primary: primary, fallback: nil) { _, _ in }
         var events: [ChatEvent] = []
         for try await event in router.stream(ChatRequest(system: "s", user: "u")) {
             events.append(event)
@@ -58,7 +58,7 @@ final class ProviderRouterTests: XCTestCase {
     func testLocalFailureWithoutFallbackThrows() async {
         let failing = StubChatProvider(name: "ollama-local",
                                        error: ProviderError.http(status: 500, body: "down"))
-        let router = ProviderRouter(primary: failing, fallback: nil) { _ in }
+        let router = ProviderRouter(primary: failing, fallback: nil) { _, _ in }
         do {
             for try await _ in router.stream(ChatRequest(system: "s", user: "u")) {}
             XCTFail("expected the stream to throw")
@@ -74,7 +74,7 @@ final class QueryServiceTests: XCTestCase {
     // never calls the LLM.
     func testEmptyRetrievalReturnsNoMatchMessage() async throws {
         let store = try SQLiteStore.inMemory()
-        let service = QueryService(store: store, embedder: StubEmbedder(), log: { _ in })
+        let service = QueryService(store: store, embedder: StubEmbedder(), log: { _, _ in })
         let result = try await service.ask("What is my bank account balance?",
                                            settings: QuerySettings())
         XCTAssertTrue(result.sourceMap.isEmpty)
@@ -94,7 +94,7 @@ final class QueryServiceTests: XCTestCase {
         try store.replaceChunks(messagePk: pk,
                                 chunks: [(.body, "webinar on April 9", embedding)])
 
-        let service = QueryService(store: store, embedder: StubEmbedder(), log: { _ in })
+        let service = QueryService(store: store, embedder: StubEmbedder(), log: { _, _ in })
         let assembler = PromptAssembler()
 
         // Retrieval works and the assembler sees an empty session after clear.
