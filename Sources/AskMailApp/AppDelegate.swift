@@ -28,8 +28,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
     private func setUpStatusItem() {
         let item = NSStatusBar.system.statusItem(withLength: NSStatusItem.squareLength)
-        item.button?.image = NSImage(systemSymbolName: "envelope.badge.person.crop",
-                                     accessibilityDescription: "AskMail")
+        item.button?.image = Self.hairlineStatusIcon()
+        item.button?.setAccessibilityLabel("AskMail")
         let menu = NSMenu()
         menu.addItem(withTitle: "Ask (\u{2303}\u{2325}Space)", action: #selector(togglePanel), keyEquivalent: "")
         menu.addItem(withTitle: "Settings\u{2026}", action: #selector(openSettings), keyEquivalent: ",")
@@ -39,6 +39,26 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         menu.items.last?.target = nil  // terminate goes to NSApp
         item.menu = menu
         statusItem = item
+    }
+
+    /// Minimal menu-bar mark: a single centered hairline, matching the app's
+    /// hairline design language. Rendered as a template image so macOS tints it
+    /// automatically for light/dark menu bars.
+    private static func hairlineStatusIcon() -> NSImage {
+        let size = NSSize(width: 18, height: 18)
+        let image = NSImage(size: size, flipped: false) { rect in
+            let inset: CGFloat = 3
+            let path = NSBezierPath()
+            path.move(to: NSPoint(x: rect.minX + inset, y: rect.midY))
+            path.line(to: NSPoint(x: rect.maxX - inset, y: rect.midY))
+            path.lineWidth = 1.25
+            path.lineCapStyle = .round
+            NSColor.black.setStroke()
+            path.stroke()
+            return true
+        }
+        image.isTemplate = true
+        return image
     }
 
     @objc private func togglePanel() {
