@@ -109,4 +109,20 @@ public enum EmlxLocator {
         }
         return map
     }
+
+    /// Whether `accountDirectory` holds at least one message, short-circuiting
+    /// on the first match rather than walking the whole tree like `index`.
+    /// Used to hide empty pseudo-accounts (e.g. "On My Mac") from the account
+    /// picker without excluding a real account that simply hasn't synced yet.
+    public static func hasAnyMessages(in accountDirectory: URL) -> Bool {
+        let enumerator = FileManager.default.enumerator(
+            at: accountDirectory,
+            includingPropertiesForKeys: [.isRegularFileKey],
+            options: [.skipsHiddenFiles]
+        )
+        while let item = enumerator?.nextObject() as? URL {
+            if item.lastPathComponent.hasSuffix(".emlx") { return true }
+        }
+        return false
+    }
 }

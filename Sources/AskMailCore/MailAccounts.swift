@@ -129,6 +129,13 @@ public enum MailAccountsReader {
                                    displayName: info?.name ?? "",
                                    directory: directory)
             }
+            // Apple Mail keeps a local-only pseudo-account ("On My Mac") for
+            // on-device folders; it has no email and is normally empty. Hide
+            // it (and anything else email-less) unless it actually holds
+            // messages, so the picker isn't cluttered with unselectable
+            // pseudo-accounts. A real account always has an email, synced or
+            // not, so this never hides one that's just mid-first-sync.
+            .filter { !$0.email.isEmpty || EmlxLocator.hasAnyMessages(in: $0.directory) }
             .sorted { $0.label.localizedCaseInsensitiveCompare($1.label) == .orderedAscending }
         return MailDiscovery(accounts: accounts, status: .ok)
     }

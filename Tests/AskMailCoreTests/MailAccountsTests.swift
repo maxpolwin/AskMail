@@ -28,6 +28,15 @@ final class MailAccountsTests: XCTestCase {
             withIntermediateDirectories: true)
     }
 
+    /// Drops a single dummy `.emlx` into an account directory, simulating a
+    /// mailbox that actually holds a message.
+    private func writeDummyMessage(accountID: String, rowID: Int64 = 1) throws {
+        let messages = root.appendingPathComponent(accountID, isDirectory: true)
+            .appendingPathComponent("Messages", isDirectory: true)
+        try FileManager.default.createDirectory(at: messages, withIntermediateDirectories: true)
+        try Data("dummy".utf8).write(to: messages.appendingPathComponent("\(rowID).emlx"))
+    }
+
     /// Builds a synthetic Accounts4.sqlite with just the columns AskMail reads,
     /// mirroring the real ZACCOUNT schema observed on a live macOS 15 install.
     private func writeAccountsDatabase(_ rows: [(id: String, description: String?, username: String?)]) throws -> URL {
@@ -88,9 +97,11 @@ final class MailAccountsTests: XCTestCase {
     }
 
     // A ZUSERNAME that isn't an email address (e.g. "local", the "On My Mac"
-    // account) never surfaces as the email.
+    // account) never surfaces as the email. Needs a message on disk, else the
+    // email-less/message-less filter below would hide it entirely.
     func testNonEmailUsernameIsIgnored() throws {
         try makeAccountDir(uuidA)
+        try writeDummyMessage(accountID: uuidA)
         let database = try writeAccountsDatabase([
             (uuidA, "On My Mac", "local"),
         ])
@@ -102,9 +113,11 @@ final class MailAccountsTests: XCTestCase {
         XCTAssertEqual(onMyMac.displayName, "On My Mac")
     }
 
-    // A directory with no database row still lists, labelled by its id.
+    // A directory with no database row still lists, labelled by its id, as
+    // long as it actually holds a message.
     func testUnmatchedDirectoryDegradesToId() throws {
         try makeAccountDir(uuidC)
+        try writeDummyMessage(accountID: uuidC)
         let database = try writeAccountsDatabase([
             (uuidA, "Personal", "alice@example.com"),
         ])
@@ -119,16 +132,60 @@ final class MailAccountsTests: XCTestCase {
         XCTAssertEqual(only.storageKey, uuidC, "no email -> storage key is the directory id")
     }
 
-    // Missing database: accounts still discovered from directories alone.
+    // Missing database: accounts with actual messages are still discovered
+    // from directories alone.
     func testMissingDatabaseStillListsDirectories() throws {
         try makeAccountDir(uuidA)
+        try writeDummyMessage(accountID: uuidA)
         try makeAccountDir(uuidB)
+        try writeDummyMessage(accountID: uuidB)
         let missing = root.appendingPathComponent("does-not-exist.sqlite")
 
         let accounts = MailAccountsReader.list(mailRoot: root, accountsDatabase: missing)
 
         XCTAssertEqual(Set(accounts.map(\.id)), [uuidA, uuidB])
         XCTAssertTrue(accounts.allSatisfy { $0.email.isEmpty && $0.displayName.isEmpty })
+    }
+
+    // An email-less pseudo-account with no messages at all (the common "On My
+    // Mac" case) is hidden from the picker entirely rather than shown as a
+    // dead-end selection.
+    func testEmptyEmaillessAccountIsExcluded() throws {
+        try makeAccountDir(uuidA)
+        let database = try writeAccountsDatabase([
+            (uuidA, "On My Mac", nil),
+        ])
+
+        let accounts = MailAccountsReader.list(mailRoot: root, accountsDatabase: database)
+
+        XCTAssertTrue(accounts.isEmpty, "empty, email-less accounts are excluded")
+    }
+
+    // The rare case where the user actually filed real mail into "On My Mac":
+    // it reappears because it now holds a message.
+    func testEmaillessAccountReappearsOnceItHasMessages() throws {
+        try makeAccountDir(uuidA)
+        try writeDummyMessage(accountID: uuidA)
+        let database = try writeAccountsDatabase([
+            (uuidA, "On My Mac", nil),
+        ])
+
+        let accounts = MailAccountsReader.list(mailRoot: root, accountsDatabase: database)
+
+        XCTAssertEqual(accounts.map(\.id), [uuidA])
+    }
+
+    // A real account (has an email) is never hidden for being empty — it may
+    // simply be mid-first-sync, not a dead pseudo-account.
+    func testEmailedAccountIncludedEvenWithoutMessagesYet() throws {
+        try makeAccountDir(uuidA)
+        let database = try writeAccountsDatabase([
+            (uuidA, "Personal", "alice@example.com"),
+        ])
+
+        let accounts = MailAccountsReader.list(mailRoot: root, accountsDatabase: database)
+
+        XCTAssertEqual(accounts.map(\.id), [uuidA])
     }
 
     // Missing mail root is not an error: empty list, no throw.
