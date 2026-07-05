@@ -10,9 +10,11 @@ final class PanelController {
     private let viewModel = AskViewModel()
 
     init() {
+        // Tall, clear window: AskView floats a content-hugging card at the top,
+        // so the extra height below is invisible and lets answers grow downward.
         panel = NSPanel(
-            contentRect: NSRect(x: 0, y: 0, width: 640, height: 420),
-            styleMask: [.nonactivatingPanel, .titled, .fullSizeContentView, .closable],
+            contentRect: NSRect(x: 0, y: 0, width: 640, height: 500),
+            styleMask: [.nonactivatingPanel, .titled, .fullSizeContentView],
             backing: .buffered,
             defer: false
         )
@@ -23,11 +25,18 @@ final class PanelController {
         panel.hidesOnDeactivate = false
         panel.isReleasedWhenClosed = false
         panel.collectionBehavior = [.canJoinAllSpaces, .fullScreenAuxiliary]
-        // Follow the system Light/Dark setting; AskView's .ultraThinMaterial is
-        // the frosted surface, so keep the window itself clear and non-opaque.
+        // Follow the system Light/Dark setting; AskView draws its own frosted,
+        // rounded card (with its own shadow), so the window stays clear,
+        // shadowless, and chrome-less — no close / minimize / zoom controls.
         panel.isOpaque = false
         panel.backgroundColor = .clear
-        panel.contentView = NSHostingView(rootView: AskView(model: viewModel))
+        panel.hasShadow = false
+        for button: NSWindow.ButtonType in [.closeButton, .miniaturizeButton, .zoomButton] {
+            panel.standardWindowButton(button)?.isHidden = true
+        }
+        panel.contentView = NSHostingView(
+            rootView: AskView(model: viewModel) { [weak self] in self?.close() }
+        )
     }
 
     func toggle() {
@@ -39,6 +48,7 @@ final class PanelController {
     }
 
     private func open() {
+        viewModel.endSession()  // clean slate: every open starts empty (FR-3)
         positionTopCenter()
         panel.makeKeyAndOrderFront(nil)
         NSApp.activate(ignoringOtherApps: true)

@@ -75,8 +75,25 @@ final class AskViewModel: ObservableObject {
 
 struct AskView: View {
     @ObservedObject var model: AskViewModel
+    var onDismiss: () -> Void = {}
+
+    @State private var answerHeight: CGFloat = 0
+    private let maxAnswerHeight: CGFloat = 320
 
     var body: some View {
+        // The card hugs its content at the top of a clear window; everything
+        // below stays transparent, so an empty question bar is just that — no
+        // material dead space under the hairline.
+        VStack(spacing: 0) {
+            card
+            Spacer(minLength: 0)
+        }
+        .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top)
+        .padding(24)
+        .onExitCommand { onDismiss() }   // Esc dismisses (and clears the session)
+    }
+
+    private var card: some View {
         VStack(alignment: .leading, spacing: 12) {
             VStack(alignment: .leading, spacing: 10) {
                 TextField("Ask your email\u{2026}", text: $model.question)
@@ -94,32 +111,44 @@ struct AskView: View {
                     .foregroundStyle(.orange)  // color-blind-safe warning hue
             }
 
-            ScrollView {
-                VStack(alignment: .leading, spacing: 12) {
-                    if !model.answer.isEmpty {
-                        Text(model.answer)
-                            .font(.system(size: 14))
-                            .textSelection(.enabled)
-                            .frame(maxWidth: .infinity, alignment: .leading)
-                    }
-                    // Streaming progress is signaled by AnimatedHairline, not a spinner.
-
-                    if !model.sources.isEmpty {
-                        Divider()
-                        Text(Defaults.sourcesListLabel)
-                            .font(.caption.weight(.semibold))
-                            .foregroundStyle(.secondary)
-                        ForEach(model.sources, id: \.number) { source in
-                            sourceRow(source.number, source.ref)
+            // Present only when there's something to show — otherwise the card
+            // ends at the hairline. Grows with content up to a cap, then scrolls.
+            if !model.answer.isEmpty || !model.sources.isEmpty {
+                ScrollView {
+                    VStack(alignment: .leading, spacing: 12) {
+                        if !model.answer.isEmpty {
+                            Text(model.answer)
+                                .font(.system(size: 14))
+                                .textSelection(.enabled)
+                                .frame(maxWidth: .infinity, alignment: .leading)
+                        }
+                        if !model.sources.isEmpty {
+                            Divider()
+                            Text(Defaults.sourcesListLabel)
+                                .font(.caption.weight(.semibold))
+                                .foregroundStyle(.secondary)
+                            ForEach(model.sources, id: \.number) { source in
+                                sourceRow(source.number, source.ref)
+                            }
                         }
                     }
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                    .background(GeometryReader { geo in
+                        Color.clear.preference(key: ContentHeightKey.self, value: geo.size.height)
+                    })
                 }
+                .frame(height: min(answerHeight, maxAnswerHeight))
+                .onPreferenceChange(ContentHeightKey.self) { answerHeight = $0 }
             }
-            .frame(maxHeight: .infinity)
         }
         .padding(16)
-        .frame(minWidth: 640, minHeight: 420)
-        .background(.ultraThinMaterial)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .background(.ultraThinMaterial, in: RoundedRectangle(cornerRadius: 16, style: .continuous))
+        .overlay(
+            RoundedRectangle(cornerRadius: 16, style: .continuous)
+                .strokeBorder(Theme.hairline, lineWidth: 0.5)
+        )
+        .shadow(color: .black.opacity(0.28), radius: 20, x: 0, y: 10)
     }
 
     @ViewBuilder
@@ -134,11 +163,19 @@ struct AskView: View {
     }
 }
 
-#Preview("Light \u{2014} streaming") {
-    let model = AskViewModel()
-    model.question = "when is the Henderson contract due?"
-    model.isStreaming = true  // hairline sweeps
-    return AskView(model: model)
+/// Reports the intrinsic height of the answer/sources stack so the scroll area
+/// can hug short answers and only scroll once they exceed the cap.
+private struct ContentHeightKey: PreferenceKey {
+    static var defaultValue: CGFloat = 0
+    static func reduce(value: inout CGFloat, nextValue: () -> CGFloat) {
+        value = max(value, nextValue())
+    }
+}
+
+#Preview("Light \u{2014} empty (hugs the bar)") {
+    AskView(model: AskViewModel())
+        .frame(width: 640, height: 460)
+        .background(Color.teal.opacity(0.35))  // stand-in for the desktop behind
         .preferredColorScheme(.light)
 }
 
@@ -147,5 +184,7 @@ struct AskView: View {
     model.question = "when is the Henderson contract due?"
     model.answer = "The Henderson contract is due Fri, Jul 11 \u{2014} Legal flagged a 3-day review window."
     return AskView(model: model)
+        .frame(width: 640, height: 460)
+        .background(Color.indigo.opacity(0.45))
         .preferredColorScheme(.dark)
 }
