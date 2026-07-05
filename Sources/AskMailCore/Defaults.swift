@@ -31,16 +31,47 @@ public enum Defaults {
     public static let sessionTurnCap = 3
 
     // MARK: Ingestion
+    /// Apple Mail's container: `~/Library/Mail`. TCC-protected — reading it (or
+    /// anything under it) requires Full Disk Access.
+    static let mailContainer = URL(
+        fileURLWithPath: NSString(string: "~/Library/Mail").expandingTildeInPath,
+        isDirectory: true)
+
     /// Apple Mail data root; each account lives in a UUID-named subdirectory,
     /// with the shared index/plist under `MailData`.
-    public static let mailRoot = URL(
-        fileURLWithPath: NSString(string: "~/Library/Mail/V10").expandingTildeInPath,
-        isDirectory: true)
+    ///
+    /// Apple bumps the schema-versioned subdirectory (`V9`, `V10`, `V11`, …)
+    /// with major macOS releases and keeps live mail only under the newest one,
+    /// so we resolve it at runtime rather than pinning a version a future macOS
+    /// will break. Computed on each access so that granting Full Disk Access and
+    /// hitting "Reload accounts" picks up the real directory without a restart.
+    public static var mailRoot: URL { resolveMailRoot() }
+
+    /// Highest-numbered `V<n>` directory under `container`, or `V10` when the
+    /// container can't be listed (no Full Disk Access yet, or Mail not set up)
+    /// so derived paths stay well-formed. Injectable for tests.
+    static func resolveMailRoot(container: URL = mailContainer) -> URL {
+        let entries = (try? FileManager.default.contentsOfDirectory(
+            at: container,
+            includingPropertiesForKeys: nil,
+            options: [.skipsHiddenFiles])) ?? []
+        let newest = entries
+            .compactMap { url -> (Int, URL)? in
+                let name = url.lastPathComponent
+                guard name.hasPrefix("V"), let n = Int(name.dropFirst()) else { return nil }
+                return (n, url)
+            }
+            .max { $0.0 < $1.0 }?.1
+        return newest ?? container.appendingPathComponent("V10", isDirectory: true)
+    }
+
     /// Maps account UUIDs to names/emails for the account picker (MailAccounts).
-    public static let accountsPlistURL =
+    public static var accountsPlistURL: URL {
         mailRoot.appendingPathComponent("MailData/Accounts.plist")
-    public static let envelopeIndexPath =
-        NSString(string: "~/Library/Mail/V10/MailData/Envelope Index").expandingTildeInPath
+    }
+    public static var envelopeIndexPath: String {
+        mailRoot.appendingPathComponent("MailData/Envelope Index").path
+    }
     /// Add to envelope-index date_sent/date_received for Unix time.
     public static let cocoaEpochOffset: Int64 = 978_307_200
     public static let embedBatchSize = 128

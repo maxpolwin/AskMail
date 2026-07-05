@@ -43,6 +43,32 @@ public struct MailAccount: Sendable, Identifiable, Equatable {
     }
 }
 
+/// Why account discovery produced the list it did — so the UI can tell "no
+/// accounts" apart from "we were blocked from looking", which are the same empty
+/// list but need very different guidance.
+public enum MailAccessStatus: Sendable, Equatable {
+    /// The Mail root was read. `accounts` reflects what's there (possibly empty
+    /// if Mail genuinely has no accounts).
+    case ok
+    /// The Mail folder exists but couldn't be read — AskMail needs Full Disk
+    /// Access. This is the common first-run state.
+    case permissionDenied
+    /// No Mail data on disk at the expected location — Mail isn't set up (or
+    /// hasn't downloaded any messages yet).
+    case notFound
+}
+
+/// Result of a discovery pass: the accounts found plus why (see `status`).
+public struct MailDiscovery: Sendable {
+    public let accounts: [MailAccount]
+    public let status: MailAccessStatus
+
+    public init(accounts: [MailAccount], status: MailAccessStatus) {
+        self.accounts = accounts
+        self.status = status
+    }
+}
+
 /// Enumerates Apple Mail accounts by listing the account directories under the
 /// Mail root and enriching each with its name/email from Accounts.plist.
 ///
@@ -71,35 +97,60 @@ public enum MailAccountsReader {
 
     /// Lists accounts found under `mailRoot`, sorted by their display label.
     /// Both parameters are injectable so tests can point at a synthetic tree.
+    /// Convenience wrapper over `discover` for callers that don't need to know
+    /// *why* the list is empty.
     public static func list(mailRoot: URL = Defaults.mailRoot,
                             accountsPlist: URL = Defaults.accountsPlistURL) -> [MailAccount] {
-        let meta = metadata(plistURL: accountsPlist)
-        let accounts = accountDirectories(mailRoot: mailRoot).map { directory -> MailAccount in
-            let id = directory.lastPathComponent
-            let info = meta[id]
-            return MailAccount(id: id,
-                               email: info?.email ?? "",
-                               displayName: info?.name ?? "",
-                               directory: directory)
-        }
-        return accounts.sorted {
-            $0.label.localizedCaseInsensitiveCompare($1.label) == .orderedAscending
-        }
+        discover(mailRoot: mailRoot, accountsPlist: accountsPlist).accounts
     }
 
-    /// Immediate subdirectories of the Mail root, excluding `MailData` (which
-    /// holds the index/plist, not a mailbox) and hidden entries.
-    private static func accountDirectories(mailRoot: URL) -> [URL] {
-        let fm = FileManager.default
-        guard let entries = try? fm.contentsOfDirectory(
-            at: mailRoot,
-            includingPropertiesForKeys: [.isDirectoryKey],
-            options: [.skipsHiddenFiles]
-        ) else { return [] }
-        return entries.filter { url in
-            guard url.lastPathComponent != "MailData" else { return false }
-            return (try? url.resourceValues(forKeys: [.isDirectoryKey]))?.isDirectory ?? false
+    /// Lists accounts under `mailRoot` and reports whether the read itself
+    /// succeeded, so the UI can distinguish an empty mailbox from a Full Disk
+    /// Access block or a missing Mail folder. Both parameters are injectable so
+    /// tests can point at a synthetic tree.
+    public static func discover(mailRoot: URL = Defaults.mailRoot,
+                                accountsPlist: URL = Defaults.accountsPlistURL) -> MailDiscovery {
+        let entries: [URL]
+        do {
+            entries = try FileManager.default.contentsOfDirectory(
+                at: mailRoot,
+                includingPropertiesForKeys: [.isDirectoryKey],
+                options: [.skipsHiddenFiles])
+        } catch {
+            return MailDiscovery(accounts: [], status: classify(error))
         }
+
+        let meta = metadata(plistURL: accountsPlist)
+        let accounts = entries
+            .filter { url in
+                guard url.lastPathComponent != "MailData" else { return false }
+                return (try? url.resourceValues(forKeys: [.isDirectoryKey]))?.isDirectory ?? false
+            }
+            .map { directory -> MailAccount in
+                let id = directory.lastPathComponent
+                let info = meta[id]
+                return MailAccount(id: id,
+                                   email: info?.email ?? "",
+                                   displayName: info?.name ?? "",
+                                   directory: directory)
+            }
+            .sorted { $0.label.localizedCaseInsensitiveCompare($1.label) == .orderedAscending }
+        return MailDiscovery(accounts: accounts, status: .ok)
+    }
+
+    /// Maps a `contentsOfDirectory` failure to an access status. TCC surfaces as
+    /// a Cocoa "no permission" error (or an underlying POSIX EPERM/EACCES); a
+    /// genuinely absent folder surfaces as "no such file".
+    private static func classify(_ error: Error) -> MailAccessStatus {
+        let nsError = error as NSError
+        if nsError.code == NSFileReadNoPermissionError { return .permissionDenied }
+        if nsError.code == NSFileReadNoSuchFileError { return .notFound }
+        let posix = (nsError.userInfo[NSUnderlyingErrorKey] as? NSError)?.code
+        if posix == Int(EPERM) || posix == Int(EACCES) { return .permissionDenied }
+        if posix == Int(ENOENT) { return .notFound }
+        // Unknown read failure: treat as "not found" so the guidance is the
+        // milder "make sure Mail is set up" rather than a false FDA claim.
+        return .notFound
     }
 
     /// Parses Accounts.plist into a map keyed by account UUID. Returns an empty

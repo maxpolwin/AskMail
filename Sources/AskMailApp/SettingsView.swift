@@ -12,12 +12,13 @@ struct SettingsView: View {
     @State private var vectorizeProgress: IngestProgress?
     @State private var statusMessage = ""
     @State private var accounts: [MailAccount] = []
+    @State private var accessStatus: MailAccessStatus = .ok
 
     var body: some View {
         Form {
             Section("Mailbox") {
                 if accounts.isEmpty {
-                    Text("No Apple Mail accounts found under ~/Library/Mail/V10. Make sure Mail is set up and AskMail has Full Disk Access, then reload.")
+                    Text(mailboxEmptyMessage)
                         .font(.caption)
                         .foregroundStyle(.secondary)
                 } else {
@@ -30,6 +31,9 @@ struct SettingsView: View {
                     .onChange(of: settings.accountID) { _, newID in
                         settings.accountEmail = accounts.first { $0.id == newID }?.email ?? ""
                     }
+                }
+                if accessStatus == .permissionDenied {
+                    Button("Open Full Disk Access settings\u{2026}") { openFullDiskAccessSettings() }
                 }
                 Button("Reload accounts") { loadAccounts() }
                 Text("Pick the Apple Mail account to index. Changing it scopes future ingestion to that account only.")
@@ -111,7 +115,7 @@ struct SettingsView: View {
         .scrollContentBackground(.hidden)   // let the frosted surface show through
         .frame(width: 520, height: 640)
         .background(.ultraThinMaterial)      // same frosted family as the ask panel
-        .tint(Theme.accent)                  // one shared violet accent
+        .tint(Theme.accent)                  // one shared system accent
         .onAppear { loadAccounts() }
         .alert("Copy debug logs?", isPresented: $showCopyLogsWarning) {
             Button("Copy", role: .destructive) {
@@ -165,8 +169,12 @@ struct SettingsView: View {
     /// Discovers Apple Mail accounts for the picker. Keeps a previously chosen
     /// account visible even if its directory is gone (so the picker never shows
     /// a blank selection), and back-fills the email for a migrated selection.
+    /// Records why discovery came up empty (`accessStatus`) so the empty state
+    /// can guide the user instead of guessing.
     private func loadAccounts() {
-        var found = MailAccountsReader.list()
+        let discovery = MailAccountsReader.discover()
+        accessStatus = discovery.status
+        var found = discovery.accounts
         let selected = settings.accountID
         if !selected.isEmpty, !found.contains(where: { $0.id == selected }) {
             found.append(MailAccount(
@@ -180,6 +188,29 @@ struct SettingsView: View {
             settings.accountEmail = match.email
         }
         accounts = found
+    }
+
+    /// Empty-state guidance tailored to why no accounts showed up: a Full Disk
+    /// Access block is the common first-run cause and needs a different fix than
+    /// Mail simply not being set up.
+    private var mailboxEmptyMessage: String {
+        switch accessStatus {
+        case .permissionDenied:
+            return "AskMail can\u{2019}t read your Mail folder. Grant it Full Disk Access in System Settings, then reload."
+        case .notFound:
+            return "No Apple Mail data found under ~/Library/Mail. Make sure Mail is set up and has downloaded messages, then reload."
+        case .ok:
+            return "No Apple Mail accounts found. Make sure Mail is set up, then reload."
+        }
+    }
+
+    /// Opens System Settings ▸ Privacy & Security ▸ Full Disk Access so the user
+    /// can add AskMail. macOS remembers where it left off; the user still has to
+    /// toggle AskMail on and hit "Reload accounts".
+    private func openFullDiskAccessSettings() {
+        if let url = URL(string: "x-apple.systempreferences:com.apple.preference.security?Privacy_AllFilesAccess") {
+            NSWorkspace.shared.open(url)
+        }
     }
 
     /// Manual trigger: runs regardless of power state (FR-6).

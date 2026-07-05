@@ -2,7 +2,7 @@ import AppKit
 import SwiftUI
 
 /// A 1pt hairline that sits under the question bar. Idle, it is a quiet static
-/// line; while `active` (the query is streaming), a soft violet highlight sweeps
+/// line; while `active` (the query is streaming), a soft accent highlight sweeps
 /// across it — replacing the old spinner. Respects Reduce Motion.
 struct AnimatedHairline: View {
     var active: Bool

@@ -99,4 +99,60 @@ final class MailAccountsTests: XCTestCase {
         XCTAssertEqual(MailAccountsReader.list(mailRoot: absent,
                                                accountsPlist: absent).count, 0)
     }
+
+    // A readable root reports .ok, even alongside real accounts.
+    func testDiscoverReportsOkWhenReadable() throws {
+        try makeAccountDir(uuidA)
+        let plist = try writeAccountsPlist([
+            ["UniqueId": uuidA, "AccountName": "Personal", "EmailAddresses": ["alice@example.com"]],
+        ])
+
+        let discovery = MailAccountsReader.discover(mailRoot: root, accountsPlist: plist)
+
+        XCTAssertEqual(discovery.status, .ok)
+        XCTAssertEqual(discovery.accounts.map(\.id), [uuidA])
+    }
+
+    // A missing root is "not set up", not a permission problem.
+    func testDiscoverReportsNotFoundForMissingRoot() {
+        let absent = root.appendingPathComponent("does-not-exist", isDirectory: true)
+        let discovery = MailAccountsReader.discover(mailRoot: absent, accountsPlist: absent)
+        XCTAssertEqual(discovery.status, .notFound)
+        XCTAssertTrue(discovery.accounts.isEmpty)
+    }
+
+    // An unreadable root (the Full Disk Access case) is reported distinctly so
+    // the UI can point the user at System Settings. Root bypasses file perms, so
+    // skip there.
+    func testDiscoverReportsPermissionDeniedForUnreadableRoot() throws {
+        try XCTSkipIf(geteuid() == 0, "chmod-based permission block is bypassed by root")
+        try makeAccountDir(uuidA)
+        let fm = FileManager.default
+        try fm.setAttributes([.posixPermissions: 0], ofItemAtPath: root.path)
+        defer { try? fm.setAttributes([.posixPermissions: 0o755], ofItemAtPath: root.path) }
+
+        let discovery = MailAccountsReader.discover(
+            mailRoot: root, accountsPlist: root.appendingPathComponent("MailData/Accounts.plist"))
+
+        XCTAssertEqual(discovery.status, .permissionDenied)
+        XCTAssertTrue(discovery.accounts.isEmpty)
+    }
+
+    // Version resolution picks the newest V<n> and ignores non-version entries.
+    func testResolvesNewestMailVersionDirectory() throws {
+        let fm = FileManager.default
+        for name in ["V9", "V10", "V11", "MailData", "Vault"] {
+            try fm.createDirectory(at: root.appendingPathComponent(name, isDirectory: true),
+                                   withIntermediateDirectories: true)
+        }
+        XCTAssertEqual(Defaults.resolveMailRoot(container: root).lastPathComponent, "V11")
+    }
+
+    // With no version directories (or an unreadable/absent container), fall back
+    // to V10 so derived paths stay well-formed.
+    func testResolveMailRootFallsBackToV10() {
+        XCTAssertEqual(Defaults.resolveMailRoot(container: root).lastPathComponent, "V10")
+        let absent = root.appendingPathComponent("nope", isDirectory: true)
+        XCTAssertEqual(Defaults.resolveMailRoot(container: absent).lastPathComponent, "V10")
+    }
 }
