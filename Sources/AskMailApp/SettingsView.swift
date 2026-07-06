@@ -191,15 +191,18 @@ struct SettingsView: View {
     private func saveKeys() {
         var saved: [String] = []
         var failed: [String] = []
+        var lastReason: String?
 
         func store(_ value: String, service: String, label: String, clear: () -> Void) {
             guard !value.isEmpty else { return }
-            if Keychain.setAPIKey(value, service: service) {
+            do {
+                try Keychain.setAPIKey(value, service: service)
                 saved.append(label)
                 clear()
-            } else {
+            } catch {
                 failed.append(label)
-                RollingLog.shared.log("keychain write FAILED for service \(service)", level: .error)
+                lastReason = "\(error)"
+                RollingLog.shared.log("keychain write FAILED for service \(service): \(error)", level: .error)
             }
         }
 
@@ -214,7 +217,11 @@ struct SettingsView: View {
             keysStatus = "Saved to Keychain: \(saved.joined(separator: ", "))."
         } else {
             let ok = saved.isEmpty ? "" : "Saved: \(saved.joined(separator: ", ")). "
-            keysStatus = "\(ok)Failed: \(failed.joined(separator: ", ")). See Keychain Access / logs."
+            // Show the real OSStatus reason; a stale item from an earlier build's
+            // code signature typically reports "item already exists" and is fixed
+            // by deleting it in Keychain Access.
+            let reason = lastReason.map { " \($0)" } ?? ""
+            keysStatus = "\(ok)Failed: \(failed.joined(separator: ", ")).\(reason)"
         }
     }
 

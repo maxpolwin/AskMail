@@ -27,6 +27,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             panel?.toggle()
         }
 
+        installMainMenu()
         setUpStatusItem()
         observeHotkeyChanges()
 
@@ -35,6 +36,44 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         let scheduler = VectorizationScheduler()
         scheduler.start()
         self.scheduler = scheduler
+    }
+
+    /// Installs a minimal main menu carrying the standard Edit commands.
+    ///
+    /// AppKit only turns ⌘X/⌘C/⌘V/⌘A/⌘Z into cut:/copy:/paste:/selectAll:/undo:
+    /// when a menu item with that key equivalent exists in the main menu. This
+    /// is a menu-bar (`.accessory`/`LSUIElement`) app with no menu bar, so
+    /// without this the text fields in Settings only paste via the right-click
+    /// menu (which AppKit's field editor supplies on its own). The menu isn't
+    /// displayed for an accessory app — it exists purely so the key equivalents
+    /// resolve to the focused text field through the responder chain.
+    private func installMainMenu() {
+        let mainMenu = NSMenu()
+
+        // A conventional (hidden) app menu in the first slot.
+        let appItem = NSMenuItem()
+        mainMenu.addItem(appItem)
+        let appMenu = NSMenu()
+        appMenu.addItem(withTitle: "Quit AskMail",
+                        action: #selector(NSApplication.terminate(_:)), keyEquivalent: "q")
+        appItem.submenu = appMenu
+
+        // Edit menu: nil-target items dispatch to the first responder (the field
+        // editor), so ⌘C/⌘V/… act on whatever text field is focused.
+        let editItem = NSMenuItem()
+        mainMenu.addItem(editItem)
+        let editMenu = NSMenu(title: "Edit")
+        editMenu.addItem(withTitle: "Undo", action: Selector(("undo:")), keyEquivalent: "z")
+        let redo = editMenu.addItem(withTitle: "Redo", action: Selector(("redo:")), keyEquivalent: "z")
+        redo.keyEquivalentModifierMask = [.command, .shift]
+        editMenu.addItem(.separator())
+        editMenu.addItem(withTitle: "Cut", action: Selector(("cut:")), keyEquivalent: "x")
+        editMenu.addItem(withTitle: "Copy", action: Selector(("copy:")), keyEquivalent: "c")
+        editMenu.addItem(withTitle: "Paste", action: Selector(("paste:")), keyEquivalent: "v")
+        editMenu.addItem(withTitle: "Select All", action: #selector(NSResponder.selectAll(_:)), keyEquivalent: "a")
+        editItem.submenu = editMenu
+
+        NSApp.mainMenu = mainMenu
     }
 
     private func setUpStatusItem() {
