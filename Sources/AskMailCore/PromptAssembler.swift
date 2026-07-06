@@ -41,12 +41,15 @@ public struct PromptAssembler: Sendable {
         var numberFor: [String: Int] = [:]
         var sourceMap: [Int: SourceRef] = [:]
         var nextNumber = 1
+        // Chunks are in fused-rank order, so the first chunk seen for an email
+        // is its best-scoring one — use that as the email's relevance.
         for chunk in budgeted where numberFor[chunk.messageID] == nil {
             numberFor[chunk.messageID] = nextNumber
             sourceMap[nextNumber] = SourceRef(messageID: chunk.messageID,
                                               subject: chunk.subject,
                                               sender: chunk.sender,
-                                              dateUnix: chunk.dateUnix)
+                                              dateUnix: chunk.dateUnix,
+                                              relevance: chunk.score > 0 ? chunk.score : nil)
             nextNumber += 1
         }
 

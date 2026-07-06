@@ -35,6 +35,19 @@ public enum Keychain {
         return String(data: data, encoding: .utf8)
     }
 
+    /// Whether a key is stored for the service, without returning its value —
+    /// lets the UI show a "saved" indicator without pulling the secret into
+    /// memory (and without a decrypt prompt, since no data is requested).
+    public static func hasAPIKey(service: String) -> Bool {
+        let query: [String: Any] = [
+            kSecClass as String: kSecClassGenericPassword,
+            kSecAttrService as String: service,
+            kSecAttrAccount as String: Defaults.keychainAccount,
+            kSecMatchLimit as String: kSecMatchLimitOne,
+        ]
+        return SecItemCopyMatching(query as CFDictionary, nil) == errSecSuccess
+    }
+
     /// Upserts the key: updates an existing item in place, otherwise adds a new
     /// one. Throws `WriteError` (with the raw status) on failure.
     ///

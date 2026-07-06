@@ -142,7 +142,13 @@ public final class QueryService: @unchecked Sendable {
         let aboveFloor = fused.filter { $0.score > settings.relevanceFloor }
         log("retrieval vector=\(vectorIDs.count) keyword=\(keywordIDs.count) fused=\(fused.count) aboveFloor=\(aboveFloor.count) top=\(aboveFloor.prefix(3).map { "\($0.id):\(String(format: "%.4f", $0.score))" }.joined(separator: ","))", .debug)
 
+        let scoreForID = Dictionary(uniqueKeysWithValues: aboveFloor.map { ($0.id, $0.score) })
         var candidates = try store.chunks(ids: aboveFloor.map(\.id))
+            .map { chunk -> ContextChunk in
+                var scored = chunk
+                scored.score = scoreForID[chunk.chunkID] ?? 0
+                return scored
+            }
 
         // Date-scoped questions filter candidates to the mentioned range
         // (B6 step 5). If the filter empties the set, keep the unfiltered

@@ -45,9 +45,12 @@ public struct ContextChunk: Sendable, Equatable {
     public var dateUnix: Int64
     public var source: ChunkSource
     public var text: String
+    /// Reciprocal-rank-fusion score from retrieval (higher = more relevant).
+    /// Carried through to `SourceRef` for the relevance bar; 0 when unranked.
+    public var score: Double
 
     public init(chunkID: Int64, messageID: String, subject: String, sender: String,
-                dateUnix: Int64, source: ChunkSource, text: String) {
+                dateUnix: Int64, source: ChunkSource, text: String, score: Double = 0) {
         self.chunkID = chunkID
         self.messageID = messageID
         self.subject = subject
@@ -55,6 +58,7 @@ public struct ContextChunk: Sendable, Equatable {
         self.dateUnix = dateUnix
         self.source = source
         self.text = text
+        self.score = score
     }
 }
 
@@ -64,12 +68,17 @@ public struct SourceRef: Sendable, Equatable {
     public var subject: String
     public var sender: String
     public var dateUnix: Int64
+    /// Retrieval relevance (best RRF score among this email's chunks); nil when
+    /// unranked. Raw and unnormalized — the UI scales it per answer.
+    public var relevance: Double?
 
-    public init(messageID: String, subject: String, sender: String, dateUnix: Int64) {
+    public init(messageID: String, subject: String, sender: String, dateUnix: Int64,
+                relevance: Double? = nil) {
         self.messageID = messageID
         self.subject = subject
         self.sender = sender
         self.dateUnix = dateUnix
+        self.relevance = relevance
     }
 }
 

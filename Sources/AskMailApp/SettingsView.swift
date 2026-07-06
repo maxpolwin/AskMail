@@ -12,6 +12,9 @@ struct SettingsView: View {
     @State private var ollamaCloudKey = ""
     @State private var mistralKey = ""
     @State private var keysStatus = ""
+    /// Keychain services with a stored key, for the "Saved" indicator. Reflects
+    /// presence only — the secret is never read back into the fields.
+    @State private var savedKeyServices: Set<String> = []
     @State private var showExportLogsWarning = false
     @State private var logsStatus = ""
     @State private var showRebuildConfirmation = false
@@ -174,7 +177,9 @@ struct SettingsView: View {
                     .foregroundStyle(.secondary)
             }
 
-            Section("Local engine") {
+            Section("Models") {
+                // Engine status first — models are downloaded and run through
+                // it — then the provider and model pickers that depend on it.
                 engineStatusRow
                 if let progress = engine.pullProgress, let model = engine.pullingModel {
                     VStack(alignment: .leading, spacing: 6) {
@@ -194,9 +199,9 @@ struct SettingsView: View {
                 Text("AskMail runs models locally with Ollama. Your email never leaves this Mac.")
                     .font(.caption)
                     .foregroundStyle(.secondary)
-            }
 
-            Section("Generation") {
+                Divider()
+
                 Picker("Provider", selection: $settings.provider) {
                     Text("Ollama (local)").tag(ProviderChoice.ollamaLocal)
                     Text("Ollama Cloud").tag(ProviderChoice.ollamaCloud)
@@ -244,14 +249,29 @@ struct SettingsView: View {
                         value: $settings.contextTokenLimit, in: 512...16384, step: 512)
                 Stepper("Answer tokens: \(settings.answerTokenLimit)",
                         value: $settings.answerTokenLimit, in: 100...4000, step: 100)
+
+                // Folded away by default — the relevance bar is self-explanatory;
+                // this is only for those who want to know what it measures.
+                DisclosureGroup {
+                    Text("Each answer's sources carry a relevance bar. AskMail ranks emails with Reciprocal Rank Fusion (RRF): it runs a semantic (vector) search and a keyword search, then blends the two rankings — each list contributes 1/(k + rank), so an email near the top of both ranks highest. Bars are scaled to the strongest match in that answer; hover a bar for the exact figure.")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                } label: {
+                    Text("How sources are ranked").font(.caption)
+                }
             }
 
             Section("API keys (stored in Keychain, never in files)") {
-                SecureField("Ollama Cloud key", text: $ollamaCloudKey)
-                SecureField("Mistral key", text: $mistralKey)
+                keyField("Ollama Cloud key", text: $ollamaCloudKey,
+                         service: Defaults.keychainServiceOllamaCloud)
+                keyField("Mistral key", text: $mistralKey,
+                         service: Defaults.keychainServiceMistral)
                 Button("Save keys") { saveKeys() }
                 if !keysStatus.isEmpty {
                     Text(keysStatus).font(.caption).foregroundStyle(.secondary)
+                } else if !savedKeyServices.isEmpty {
+                    Text("Leave a field blank to keep its saved key; type to replace it.")
+                        .font(.caption).foregroundStyle(.secondary)
                 }
             }
 
@@ -299,6 +319,7 @@ struct SettingsView: View {
         .tint(Theme.accent)                  // one shared system accent
         .onAppear {
             loadAccounts()
+            refreshSavedKeys()
             launchAtLogin = LoginItem.isEnabled   // reflect external changes
             vectorizer.refreshFailedCount()
             Task { await engine.refresh() }
@@ -386,17 +407,52 @@ struct SettingsView: View {
                 Text(choice.label).tag(choice.id)
             }
         }
-        ForEach(groups.downloadable, id: \.id) { option in
-            HStack {
-                VStack(alignment: .leading, spacing: 2) {
-                    Text(option.id).font(.caption)
-                    Text(option.blurb).font(.caption).foregroundStyle(.secondary)
+        // Not-yet-installed recommendations stay folded away so the defaults
+        // read clean; they open on their own only when nothing is selectable
+        // yet, since then the user has to download one to proceed.
+        if !groups.downloadable.isEmpty {
+            ModelDownloadDisclosure(
+                options: groups.downloadable,
+                isPulling: engine.pullingModel != nil,
+                mustChoose: groups.selectable.isEmpty,
+                onDownload: { model in Task { await engine.pull(model: model) } })
+        }
+    }
+
+    /// The recommended-but-not-installed models, tucked behind a disclosure so
+    /// the picker keeps to its default. Opens by default only when `mustChoose`
+    /// — i.e. there's no installed model to select, so a download is required.
+    private struct ModelDownloadDisclosure: View {
+        let options: [ModelOption]
+        let isPulling: Bool
+        let onDownload: (String) -> Void
+        @State private var expanded: Bool
+
+        init(options: [ModelOption], isPulling: Bool, mustChoose: Bool,
+             onDownload: @escaping (String) -> Void) {
+            self.options = options
+            self.isPulling = isPulling
+            self.onDownload = onDownload
+            _expanded = State(initialValue: mustChoose)
+        }
+
+        var body: some View {
+            DisclosureGroup(isExpanded: $expanded) {
+                ForEach(options, id: \.id) { option in
+                    HStack {
+                        VStack(alignment: .leading, spacing: 2) {
+                            Text(option.id).font(.caption)
+                            Text(option.blurb).font(.caption).foregroundStyle(.secondary)
+                        }
+                        Spacer()
+                        Button("Download (\(option.sizeLabel))") { onDownload(option.id) }
+                            .disabled(isPulling)
+                    }
                 }
-                Spacer()
-                Button("Download (\(option.sizeLabel))") {
-                    Task { await engine.pull(model: option.id) }
-                }
-                .disabled(engine.pullingModel != nil)
+            } label: {
+                Text("Download other models (\(options.count))")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
             }
         }
     }
@@ -419,6 +475,32 @@ struct SettingsView: View {
         if !note.isEmpty {
             Text(note).font(.caption).foregroundStyle(.secondary)
         }
+    }
+
+    /// A secure key field with a "Saved" badge when a key for `service` already
+    /// exists in the Keychain — so the user knows not to re-enter it. The field
+    /// stays empty (the secret is never read back); a saved key is only replaced
+    /// when they type a new value.
+    @ViewBuilder
+    private func keyField(_ label: String, text: Binding<String>, service: String) -> some View {
+        HStack {
+            SecureField(label, text: text)
+            if savedKeyServices.contains(service) {
+                Label("Saved", systemImage: "checkmark.seal.fill")
+                    .labelStyle(.titleAndIcon)
+                    .font(.caption)
+                    .foregroundStyle(Theme.accent)
+            }
+        }
+    }
+
+    private func refreshSavedKeys() {
+        var present: Set<String> = []
+        for service in [Defaults.keychainServiceOllamaCloud, Defaults.keychainServiceMistral]
+        where Keychain.hasAPIKey(service: service) {
+            present.insert(service)
+        }
+        savedKeyServices = present
     }
 
     /// Writes only the non-empty fields, verifies each Keychain write, and
@@ -451,6 +533,7 @@ struct SettingsView: View {
             keysStatus = "Enter a key first \u{2014} nothing to save."
         } else if failed.isEmpty {
             keysStatus = "Saved to Keychain: \(saved.joined(separator: ", "))."
+            refreshSavedKeys()   // light up the "Saved" badges immediately
             // A fresh key may unlock the remote model list for the current
             // provider's picker.
             Task { await remote.refresh(for: settings.provider) }
@@ -461,6 +544,7 @@ struct SettingsView: View {
             // by deleting it in Keychain Access.
             let reason = lastReason.map { " \($0)" } ?? ""
             keysStatus = "\(ok)Failed: \(failed.joined(separator: ", ")).\(reason)"
+            refreshSavedKeys()   // reflect any that did save
         }
     }
 

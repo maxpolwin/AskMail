@@ -34,6 +34,27 @@ final class PromptContractTests: XCTestCase {
         XCTAssertFalse(prompt.user.contains("--- [3]"))
     }
 
+    // A source's relevance is the best (first, since fused-ranked) chunk score
+    // of its email; unscored chunks leave relevance nil.
+    func testSourceRelevanceUsesBestChunkScore() {
+        let assembler = PromptAssembler()
+        let scored = { (id: Int64, message: String, score: Double) in
+            ContextChunk(chunkID: id, messageID: message, subject: "S", sender: "s",
+                         dateUnix: 0, source: .body, text: "t", score: score)
+        }
+        let prompt = assembler.assemble(
+            question: "q",
+            chunks: [scored(1, "a@x", 0.9), scored(2, "a@x", 0.5), scored(3, "b@x", 0.4)],
+            session: []
+        )
+        XCTAssertEqual(prompt.sourceMap[1]?.relevance, 0.9)  // A's top chunk
+        XCTAssertEqual(prompt.sourceMap[2]?.relevance, 0.4)
+
+        let unscored = assembler.assemble(
+            question: "q", chunks: [chunk(1, message: "a@x", text: "t")], session: [])
+        XCTAssertNil(unscored.sourceMap[1]?.relevance)
+    }
+
     // §3: exact delimiter format, date rendered YYYY-MM-DD, source label.
     func testContextBlockFormat() {
         let assembler = PromptAssembler()

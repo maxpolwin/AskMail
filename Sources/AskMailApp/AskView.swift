@@ -19,6 +19,18 @@ func answerMarkdown(_ text: String) -> AttributedString {
         ?? AttributedString(text)
 }
 
+/// Retrieval relevance per source number, normalized 0–100% against the
+/// strongest source in this answer (the raw RRF score has no meaningful
+/// absolute scale — it only ranks). Empty when no source carries a score.
+func relevancePercents(_ sources: [(number: Int, ref: SourceRef)]) -> [Int: Int] {
+    guard let top = sources.compactMap({ $0.ref.relevance }).max(), top > 0 else { return [:] }
+    return sources.reduce(into: [:]) { out, source in
+        if let score = source.ref.relevance {
+            out[source.number] = Int((score / top * 100).rounded())
+        }
+    }
+}
+
 @MainActor
 final class AskViewModel: ObservableObject {
     @Published var question = ""
@@ -87,8 +99,13 @@ final class AskViewModel: ObservableObject {
     func clipboardText() -> String {
         var out = String(answerMarkdown(answer).characters)  // strip ** etc.
         if !sources.isEmpty {
+            let pct = relevancePercents(sources)
             out += "\n\n\(Defaults.sourcesListLabel)\n"
-            out += sources.map { formatSource($0.number, $0.ref) }.joined(separator: "\n")
+            out += sources.map { source in
+                let line = formatSource(source.number, source.ref)
+                // The exact relevance figure travels with the pasted text.
+                return pct[source.number].map { "\(line)  \u{00B7} \($0)% relevant" } ?? line
+            }.joined(separator: "\n")
         }
         return out
     }
@@ -161,19 +178,33 @@ struct AskView: View {
 
             // Present only when there's something to show — otherwise the card
             // ends at the hairline. Grows with content up to a cap, then scrolls.
-            // Answer and sources are one selectable Text so a drag-selection can
-            // span both and ⌘C grabs everything; the source lines carry link
-            // attributes, so they stay clickable.
+            // Text is selectable and the source lines carry link attributes, so
+            // they stay clickable; each source also gets a relevance bar.
             if !model.answer.isEmpty || !model.sources.isEmpty {
                 ScrollView {
-                    Text(combinedOutput)
-                        .font(.system(size: 14))
-                        .textSelection(.enabled)
-                        .frame(maxWidth: .infinity, alignment: .leading)
-                        .contextMenu { Button("Copy") { copyOutput() } }
-                        .background(GeometryReader { geo in
-                            Color.clear.preference(key: ContentHeightKey.self, value: geo.size.height)
-                        })
+                    VStack(alignment: .leading, spacing: 12) {
+                        if !model.answer.isEmpty {
+                            Text(styledAnswer)
+                                .font(.system(size: 14))
+                                .frame(maxWidth: .infinity, alignment: .leading)
+                        }
+                        if !model.sources.isEmpty {
+                            Divider()
+                            Text(Defaults.sourcesListLabel)
+                                .font(.caption.weight(.semibold))
+                                .foregroundStyle(.secondary)
+                            let pct = relevancePercents(model.sources)
+                            ForEach(model.sources, id: \.number) { source in
+                                sourceRow(source.number, source.ref, percent: pct[source.number])
+                            }
+                        }
+                    }
+                    .textSelection(.enabled)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                    .contextMenu { Button("Copy") { copyOutput() } }
+                    .background(GeometryReader { geo in
+                        Color.clear.preference(key: ContentHeightKey.self, value: geo.size.height)
+                    })
                 }
                 .frame(height: min(answerHeight, maxAnswerHeight))
                 .onPreferenceChange(ContentHeightKey.self) { answerHeight = $0 }
@@ -194,33 +225,57 @@ struct AskView: View {
         .shadow(color: .black.opacity(0.28), radius: 20, x: 0, y: 10)
     }
 
-    /// Answer + sources as one selectable, partly-linked string. The answer's
-    /// citation superscripts are tinted to the system accent; the "Sources"
-    /// heading is a quiet caption; each source line is accent-coloured and
-    /// carries a `message://` link, so it opens on click yet still selects and
-    /// copies as text.
-    private var combinedOutput: AttributedString {
+    /// The Markdown answer with its citation superscripts tinted to the system
+    /// accent — the same colour as the source links.
+    private var styledAnswer: AttributedString {
         var out = answerMarkdown(model.answer)
         for index in out.characters.indices where Self.superscriptDigits.contains(out.characters[index]) {
             out[index..<out.characters.index(after: index)].foregroundColor = Theme.accent
         }
-        guard !model.sources.isEmpty else { return out }
-
-        out += AttributedString("\n\n")
-        var heading = AttributedString(Defaults.sourcesListLabel + "\n")
-        heading.font = .caption.weight(.semibold)
-        heading.foregroundColor = .secondary
-        out += heading
-
-        for (offset, source) in model.sources.enumerated() {
-            var line = AttributedString(formatSource(source.number, source.ref))
-            line.font = .callout
-            line.foregroundColor = Theme.accent
-            line.link = CitationRenderer.messageURL(messageID: source.ref.messageID)
-            out += line
-            if offset < model.sources.count - 1 { out += AttributedString("\n") }
-        }
         return out
+    }
+
+    /// One source: the accent-coloured, clickable, selectable line, then a
+    /// relevance bar scaled to the strongest source in this answer. Hover the
+    /// bar for the exact figure; it's also carried into copied text.
+    @ViewBuilder
+    private func sourceRow(_ number: Int, _ ref: SourceRef, percent: Int?) -> some View {
+        HStack(spacing: 8) {
+            Text(sourceLine(number, ref))
+                .font(.callout)
+                .lineLimit(1)
+            Spacer(minLength: 8)
+            if let percent {
+                RelevanceBar(fraction: Double(percent) / 100)
+                    .help("Relevance \(percent)% \u{00B7} RRF \(String(format: "%.4f", ref.relevance ?? 0))")
+            }
+        }
+    }
+
+    /// The source line as an attributed string: accent-coloured with a
+    /// `message://` link so it opens on click yet still selects and copies.
+    private func sourceLine(_ number: Int, _ ref: SourceRef) -> AttributedString {
+        var line = AttributedString(formatSource(number, ref))
+        line.foregroundColor = Theme.accent
+        line.link = CitationRenderer.messageURL(messageID: ref.messageID)
+        return line
+    }
+
+    /// A thin capsule meter filled to `fraction` (0–1) of the strongest source,
+    /// in the system accent. A floor keeps a weak-but-present source visible.
+    private struct RelevanceBar: View {
+        let fraction: Double
+        var body: some View {
+            Capsule()
+                .fill(Theme.hairline)
+                .frame(width: 54, height: 5)
+                .overlay(alignment: .leading) {
+                    Capsule()
+                        .fill(Theme.accent)
+                        .frame(width: 54 * min(1, max(0.06, fraction)), height: 5)
+                }
+                .accessibilityLabel("Relevance \(Int((fraction * 100).rounded())) percent")
+        }
     }
 
     /// Transient "Copied" pill in the top-right of the output, shown after an
