@@ -260,6 +260,26 @@ struct SettingsView: View {
                 Stepper("Answer tokens: \(settings.answerTokenLimit)",
                         value: $settings.answerTokenLimit, in: 100...4000, step: 100)
 
+                // Guidance: what good values are for this Mac + model, with a
+                // one-click apply. Only nudge when the current values differ.
+                let advice = tokenAdvice
+                Text(advice.rationale)
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                if settings.contextTokenLimit != advice.contextTokens
+                    || settings.answerTokenLimit != advice.answerTokens {
+                    HStack(spacing: 8) {
+                        Text("Recommended: \(advice.contextTokens) context, \(advice.answerTokens) answer.")
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                        Button("Use recommended") {
+                            settings.contextTokenLimit = advice.contextTokens
+                            settings.answerTokenLimit = advice.answerTokens
+                        }
+                        .font(.caption)
+                    }
+                }
+
                 // Folded away by default — the relevance bar is self-explanatory;
                 // this is only for those who want to know what it measures.
                 DisclosureGroup {
@@ -502,6 +522,26 @@ struct SettingsView: View {
                     .foregroundStyle(Theme.accent)
             }
         }
+    }
+
+    /// Recommended token budgets for the current provider, selected model, and
+    /// this Mac's memory. Recomputed on each render so it tracks provider/model
+    /// changes; ProcessInfo lookups are cheap.
+    private var tokenAdvice: TokenAdvisor.Recommendation {
+        TokenAdvisor.recommend(
+            isLocal: settings.provider == .ollamaLocal,
+            modelSizeMB: selectedLocalModelSizeMB,
+            physicalMemoryBytes: ProcessInfo.processInfo.physicalMemory)
+    }
+
+    /// Size of the selected local chat model: the real installed size when
+    /// known, else the registry estimate, else a safe default.
+    private var selectedLocalModelSizeMB: Int {
+        if let installed = engine.installedModels.first(where: { $0.name == settings.localChatModel }),
+           installed.sizeBytes > 0 {
+            return Int(installed.sizeBytes / 1_000_000)
+        }
+        return ModelCatalog.chat.first { $0.id == settings.localChatModel }?.approxSizeMB ?? 4700
     }
 
     /// Human-readable name of the selected provider, for the privacy note.

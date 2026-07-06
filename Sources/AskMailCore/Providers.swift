@@ -7,14 +7,20 @@ public struct ChatRequest: Sendable {
     public var user: String
     public var maxTokens: Int
     public var temperature: Double
+    /// Ollama context window (`num_ctx`) to request so the prompt isn't
+    /// silently truncated to the model's default; 0 leaves the default. Ignored
+    /// by providers that manage their own context (Mistral).
+    public var contextWindow: Int
 
     public init(system: String, user: String,
                 maxTokens: Int = Defaults.answerTokenLimit,
-                temperature: Double = Defaults.temperature) {
+                temperature: Double = Defaults.temperature,
+                contextWindow: Int = 0) {
         self.system = system
         self.user = user
         self.maxTokens = maxTokens
         self.temperature = temperature
+        self.contextWindow = contextWindow
     }
 }
 
@@ -113,6 +119,15 @@ public struct OllamaClient: ChatProvider {
                     if let apiKey {
                         urlRequest.setValue("Bearer \(apiKey)", forHTTPHeaderField: "Authorization")
                     }
+                    var options: [String: Any] = [
+                        "temperature": request.temperature,
+                        "num_predict": request.maxTokens,
+                    ]
+                    // Size the context window to the prompt so Ollama doesn't
+                    // truncate it to the model's (smaller) default.
+                    if request.contextWindow > 0 {
+                        options["num_ctx"] = request.contextWindow
+                    }
                     let body: [String: Any] = [
                         "model": model,
                         "stream": true,
@@ -120,10 +135,7 @@ public struct OllamaClient: ChatProvider {
                             ["role": "system", "content": request.system],
                             ["role": "user", "content": request.user],
                         ],
-                        "options": [
-                            "temperature": request.temperature,
-                            "num_predict": request.maxTokens,
-                        ],
+                        "options": options,
                     ]
                     urlRequest.httpBody = try JSONSerialization.data(withJSONObject: body)
 

@@ -131,5 +131,9 @@ public enum Defaults {
        across emails), surface the most recent and note the change, citing both.
     7. Do not output source numbers as prose (never write "source 1 says").
        Only use them inside the bracketed citation markers.
+    8. Formatting: write in plain prose. You may use **bold** or *italic*
+       sparingly and strategically to highlight a single key term, name, or
+       figure, but never enough to clutter the answer. Do not use headings,
+       tables, or bullet lists.
     """
 }

@@ -79,10 +79,18 @@ final class SettingsStore: ObservableObject {
         mistralModel = defaults.string(forKey: "mistralModel") ?? Defaults.mistralChatModel
         embeddingModel = defaults.string(forKey: "embeddingModel") ?? Defaults.embeddingModel
         systemPrompt = defaults.string(forKey: "systemPrompt") ?? Defaults.defaultSystemPrompt
+        // First run has no stored token budgets: seed them from the machine +
+        // default local model rather than a flat constant. Users can retune in
+        // Settings (the "Use recommended" affordance stays available there).
+        let firstRunModelMB = ModelCatalog.chat
+            .first { $0.id == Defaults.localChatModel }?.approxSizeMB ?? 4700
+        let recommended = TokenAdvisor.recommend(
+            isLocal: true, modelSizeMB: firstRunModelMB,
+            physicalMemoryBytes: ProcessInfo.processInfo.physicalMemory)
         let contextLimit = defaults.integer(forKey: "contextTokenLimit")
-        contextTokenLimit = contextLimit > 0 ? contextLimit : Defaults.contextTokenLimit
+        contextTokenLimit = contextLimit > 0 ? contextLimit : recommended.contextTokens
         let answerLimit = defaults.integer(forKey: "answerTokenLimit")
-        answerTokenLimit = answerLimit > 0 ? answerLimit : Defaults.answerTokenLimit
+        answerTokenLimit = answerLimit > 0 ? answerLimit : recommended.answerTokens
         accountID = defaults.string(forKey: "accountID") ?? ""
         accountEmail = defaults.string(forKey: "accountEmail") ?? ""
         lastVectorized = defaults.object(forKey: "lastVectorized") as? Date

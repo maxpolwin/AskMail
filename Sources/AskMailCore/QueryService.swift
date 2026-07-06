@@ -100,10 +100,14 @@ public final class QueryService: @unchecked Sendable {
 
         // 4. Route and stream, buffering the answer into the session on completion.
         let router = makeRouter(settings: settings)
+        // num_ctx must hold the context budget + the answer + the prompt
+        // scaffold (system prompt, question, session recap); ~2k covers it.
         let request = ChatRequest(system: prompt.system,
                                   user: prompt.user,
                                   maxTokens: settings.answerTokenLimit,
-                                  temperature: settings.temperature)
+                                  temperature: settings.temperature,
+                                  contextWindow: settings.contextTokenLimit
+                                      + settings.answerTokenLimit + 2048)
         let upstream = router.stream(request)
 
         let events = AsyncThrowingStream<ChatEvent, Error> { continuation in
