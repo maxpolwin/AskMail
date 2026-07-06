@@ -107,6 +107,36 @@ public struct EmlxFile: Sendable {
 /// nested `Messages` directories.
 public enum EmlxLocator {
 
+    /// Apple Mail mailbox folders whose messages are vectorized. Deliberately
+    /// limited to live Inbox and Sent: Trash, Junk/Spam, Archive, and Drafts are
+    /// excluded so deleted, spam, archived, and unsent mail never enter the
+    /// searchable index (user decision 2026-07-06 — on one account Trash alone
+    /// held ~90% of the on-disk .emlx files). Compared case-insensitively against
+    /// the top-level `.mbox` folder name; common provider spellings of "Sent" are
+    /// included for non-Posteo IMAP/Exchange accounts.
+    static let indexedMailboxNames: Set<String> = [
+        "inbox", "sent", "sent messages", "sent items",
+    ]
+
+    /// The top-level Apple Mail mailbox for a message file: the first path
+    /// component ending in `.mbox`, e.g. "INBOX" for
+    /// `…/<account>/INBOX.mbox/<uuid>/Data/…/Messages/1.emlx`. Submailboxes nest
+    /// (`Archive.mbox/2023.mbox/…`), so the first `.mbox` component is always the
+    /// account's top-level folder. Returns nil for a file under no `.mbox` folder.
+    static func topLevelMailbox(of file: URL) -> String? {
+        for component in file.pathComponents where component.hasSuffix(".mbox") {
+            return String(component.dropLast(5))  // drop ".mbox"
+        }
+        return nil
+    }
+
+    /// Whether a message file lives in a mailbox we vectorize (Inbox or Sent).
+    /// Files under Trash, Junk, Archive, or Drafts are skipped.
+    static func isIndexed(_ file: URL) -> Bool {
+        guard let mailbox = topLevelMailbox(of: file) else { return false }
+        return indexedMailboxNames.contains(mailbox.lowercased())
+    }
+
     /// Scans the account tree once, returning one entry per message ROWID with a
     /// change fingerprint. Prefers a fully-downloaded file over its `.partial`
     /// sibling when both are present for the same ROWID.
@@ -121,6 +151,8 @@ public enum EmlxLocator {
         while let item = enumerator?.nextObject() as? URL {
             let name = item.lastPathComponent
             guard name.hasSuffix(".emlx") else { continue }
+            // Only Inbox and Sent are vectorized; skip Trash/Junk/Archive/Drafts.
+            guard isIndexed(item) else { continue }
             let isPartial = name.hasSuffix(".partial.emlx")
             let stem = name
                 .replacingOccurrences(of: ".partial.emlx", with: "")
