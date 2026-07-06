@@ -23,7 +23,8 @@ public enum CitationRenderer {
     }
 
     public static func render(answer: String, sourceMap: [Int: SourceRef]) -> Rendered {
-        let regex = try! NSRegularExpression(pattern: "\\[(\\d+)\\]")
+        // A single bracket may cite several sources: [1], [4,6], [4, 6].
+        let regex = try! NSRegularExpression(pattern: "\\[\\s*(\\d+(?:\\s*,\\s*\\d+)*)\\s*\\]")
         var text = answer
         var used = Set<Int>()
         var dropped: [Int] = []
@@ -31,21 +32,26 @@ public enum CitationRenderer {
         let matches = regex.matches(in: text, range: NSRange(text.startIndex..., in: text))
         for match in matches.reversed() {
             guard let full = Range(match.range, in: text),
-                  let digits = Range(match.range(at: 1), in: text),
-                  let number = Int(text[digits]) else { continue }
-            // Absorb one preceding space so the superscript sits immediately
-            // after the word it follows (§6), and dropped markers leave no
+                  let group = Range(match.range(at: 1), in: text) else { continue }
+            let numbers = text[group]
+                .split(separator: ",")
+                .compactMap { Int($0.trimmingCharacters(in: .whitespaces)) }
+            // Absorb one preceding space so the citation sits immediately after
+            // the word it follows (§6), and a fully-dropped marker leaves no
             // hanging space.
             var lower = full.lowerBound
             if lower > text.startIndex, text[text.index(before: lower)] == " " {
                 lower = text.index(before: lower)
             }
-            if sourceMap[number] != nil {
-                used.insert(number)
-                text.replaceSubrange(lower..<full.upperBound, with: superscript(number))
-            } else {
-                dropped.append(number)
+            let valid = numbers.filter { sourceMap[$0] != nil }
+            dropped.append(contentsOf: numbers.filter { sourceMap[$0] == nil })
+            if valid.isEmpty {
                 text.replaceSubrange(lower..<full.upperBound, with: "")
+            } else {
+                valid.forEach { used.insert($0) }
+                // Multiple numbers render as a thin-spaced cluster: ⁴ ⁶.
+                let cluster = valid.map(superscript).joined(separator: "\u{2009}")
+                text.replaceSubrange(lower..<full.upperBound, with: cluster)
             }
         }
 

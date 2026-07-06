@@ -165,6 +165,23 @@ final class CitationRendererTests: XCTestCase {
         XCTAssertEqual(rendered.sources.map(\.number), [1, 2])
     }
 
+    // A comma-combined citation renders each number and lists each source.
+    func testCombinedCitation() {
+        let rendered = CitationRenderer.render(answer: "War strains finances [1, 2].",
+                                               sourceMap: map)
+        XCTAssertEqual(rendered.text, "War strains finances\u{00b9}\u{2009}\u{00b2}.")
+        XCTAssertEqual(rendered.sources.map(\.number), [1, 2])
+        XCTAssertTrue(rendered.droppedMarkers.isEmpty)
+    }
+
+    // Within a combined marker, unknown numbers drop and the valid ones stay.
+    func testCombinedCitationPartialDrop() {
+        let rendered = CitationRenderer.render(answer: "Claim [2,9].", sourceMap: map)
+        XCTAssertEqual(rendered.text, "Claim\u{00b2}.")
+        XCTAssertEqual(rendered.droppedMarkers, [9])
+        XCTAssertEqual(rendered.sources.map(\.number), [2])
+    }
+
     func testMultiDigitSuperscript() {
         XCTAssertEqual(CitationRenderer.superscript(12), "\u{00b9}\u{00b2}")
     }
