@@ -82,6 +82,32 @@ final class IncrementalIngestTests: XCTestCase {
         XCTAssertEqual(try store.messageCount(), 0, "nothing embedded while the backend is down")
     }
 
+    func testAbortsImmediatelyWhenEmbeddingModelMissing() async throws {
+        let store = try SQLiteStore.inMemory()
+        let embedder = ModelMissingEmbedder()
+        let ingestor = MailboxIngestor(store: store, embedder: embedder,
+                                       account: "test", log: { _, _ in })
+
+        // The model isn't pulled, so every file would 404 identically. The run
+        // must abort on the very first file, not grind through all 10.
+        let many = (1...10).map { id in
+            EmlxFile(sourceID: Int64(id),
+                     url: Self.fixturesDirectory.appendingPathComponent("msg-0001-plain.emlx"),
+                     fingerprint: "v\(id)")
+        }
+        do {
+            _ = try await ingestor.ingestNew(many)
+            XCTFail("expected the run to abort")
+        } catch let error as IngestError {
+            guard case .embeddingModelMissing(let model) = error else { return XCTFail("wrong error") }
+            XCTAssertEqual(model, "nomic-embed-text")
+        }
+        XCTAssertEqual(embedder.calls, 1, "aborts on the first file, not once per file")
+        XCTAssertEqual(try store.messageCount(), 0, "nothing embedded while the model is missing")
+        XCTAssertEqual(try store.failedIngestCount(), 0,
+                       "a global setup error isn't recorded as a per-file failure")
+    }
+
     func testFingerprintRoundTripsAndDeleteAllClearsIt() async throws {
         let store = try SQLiteStore.inMemory()
         XCTAssertNil(try store.ingestedFingerprint(sourceID: 42))
@@ -106,6 +132,16 @@ final class UnreachableEmbedder: EmbeddingProvider, @unchecked Sendable {
     func embed(_ texts: [String]) async throws -> [[Float]] {
         calls += 1
         throw URLError(.cannotConnectToHost)
+    }
+}
+
+/// Simulates Ollama running but without the embedding model pulled: every embed
+/// returns the same "not found, try pulling it first" 404.
+final class ModelMissingEmbedder: EmbeddingProvider, @unchecked Sendable {
+    private(set) var calls = 0
+    func embed(_ texts: [String]) async throws -> [[Float]] {
+        calls += 1
+        throw ProviderError.ollamaModelMissing(model: "nomic-embed-text")
     }
 }
 
@@ -155,5 +191,15 @@ final class RetryTests: XCTestCase {
         XCTAssertTrue(OllamaEmbedder.isTransient(ProviderError.http(status: 503, body: "")))
         XCTAssertFalse(OllamaEmbedder.isTransient(ProviderError.http(status: 404, body: "")))
         XCTAssertTrue(OllamaEmbedder.isTransient(URLError(.timedOut)))
+    }
+
+    // Only Ollama's specific "try pulling it first" 404 is treated as a missing
+    // model; other 404s (and non-404s) are ordinary errors.
+    func testModelMissingDetection() {
+        XCTAssertTrue(ProviderError.isOllamaModelMissing(
+            status: 404,
+            body: #"{"error":"model \"nomic-embed-text\" not found, try pulling it first"}"#))
+        XCTAssertFalse(ProviderError.isOllamaModelMissing(status: 404, body: "not found"))
+        XCTAssertFalse(ProviderError.isOllamaModelMissing(status: 500, body: "try pulling"))
     }
 }

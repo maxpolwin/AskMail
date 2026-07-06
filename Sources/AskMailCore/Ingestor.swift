@@ -4,11 +4,17 @@ public enum IngestError: Error, CustomStringConvertible {
     /// The embedding backend (local Ollama) became unreachable, so the run was
     /// stopped rather than logging a failure for every remaining message.
     case embedderUnreachable
+    /// The embedding model isn't installed in Ollama. This fails every message
+    /// identically, so the run aborts immediately with the exact pull command
+    /// rather than logging thousands of identical 404s.
+    case embeddingModelMissing(model: String)
 
     public var description: String {
         switch self {
         case .embedderUnreachable:
             return "embedding backend unreachable (is Ollama running at localhost:11434?)"
+        case .embeddingModelMissing(let model):
+            return "embedding model \u{201C}\(model)\u{201D} not installed (run: ollama pull \(model))"
         }
     }
 }
@@ -130,6 +136,14 @@ public final class MailboxIngestor {
                 consecutiveUnreachable = 0
                 maxDate = max(maxDate, email.dateUnix)
             } catch {
+                // A missing embedding model is a setup error, not a per-file
+                // fault: it will fail every remaining message identically, so
+                // abort now with an actionable message instead of recording
+                // thousands of identical failures.
+                if let model = Self.missingEmbeddingModel(error) {
+                    log("ingest aborted: embedding model \(model) not installed; \(ingested) done this run", .error)
+                    throw IngestError.embeddingModelMissing(model: model)
+                }
                 failed += 1
                 log("ingest FAILED file=\(file.url.lastPathComponent) error=\(error)", .error)
                 try? store.recordIngestFailure(sourceID: file.sourceID, path: file.url.path,
@@ -154,6 +168,14 @@ public final class MailboxIngestor {
         }
         log("ingest done (incremental): \(ingested) new, \(skipped) unchanged, \(failed) failed", .info)
         return IngestSummary(ingested: ingested, failed: failed, skipped: skipped, newWatermark: newWatermark)
+    }
+
+    /// The model name if this error is Ollama's "model not installed" 404 — a
+    /// global misconfiguration that dooms every message, distinct from a
+    /// per-message parse/embed failure.
+    static func missingEmbeddingModel(_ error: Error) -> String? {
+        if case ProviderError.ollamaModelMissing(let model) = error { return model }
+        return nil
     }
 
     /// Whether an error means the embedding backend is unreachable (daemon down,

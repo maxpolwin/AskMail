@@ -31,6 +31,9 @@ public enum ProviderError: Error, CustomStringConvertible {
     case http(status: Int, body: String)
     case malformedResponse(String)
     case missingAPIKey(service: String)
+    /// A local Ollama model isn't pulled yet. Carries the model name so callers
+    /// can show the exact `ollama pull <model>` remedy instead of a raw 404.
+    case ollamaModelMissing(model: String)
 
     public var description: String {
         switch self {
@@ -40,7 +43,17 @@ public enum ProviderError: Error, CustomStringConvertible {
             return "malformed provider response: \(detail)"
         case .missingAPIKey(let service):
             return "no API key in Keychain for service \(service)"
+        case .ollamaModelMissing(let model):
+            return "Ollama model \u{201C}\(model)\u{201D} isn\u{2019}t installed. "
+                + "Run \u{2018}ollama pull \(model)\u{2019} in Terminal, then try again."
         }
+    }
+
+    /// Whether an error is Ollama's "model … not found, try pulling it first"
+    /// 404 — a missing local model, which retrying won't fix and which has an
+    /// exact remedy, as opposed to any other client error.
+    public static func isOllamaModelMissing(status: Int, body: String) -> Bool {
+        status == 404 && body.contains("try pulling")
     }
 }
 
@@ -127,6 +140,12 @@ public struct OllamaClient: ChatProvider {
                         if json["done"] as? Bool == true { break }
                     }
                     continuation.finish()
+                } catch ProviderError.http(let status, let body)
+                            where apiKey == nil
+                            && ProviderError.isOllamaModelMissing(status: status, body: body) {
+                    // A missing *local* chat model has the same pull-it remedy as
+                    // a missing embedding model; cloud 404s stay verbatim.
+                    continuation.finish(throwing: ProviderError.ollamaModelMissing(model: model))
                 } catch {
                     continuation.finish(throwing: error)
                 }
@@ -184,19 +203,26 @@ public struct OllamaEmbedder: EmbeddingProvider {
 
         // Retry transport errors and 5xx (transient), but not 4xx (won't fix by
         // retrying — e.g. model not pulled), so a real misconfiguration fails fast.
-        return try await Retry.run(attempts: maxAttempts, shouldRetry: Self.isTransient) {
-            let (data, response) = try await URLSession.shared.data(for: request)
-            if let http = response as? HTTPURLResponse, !(200...299).contains(http.statusCode) {
-                throw ProviderError.http(status: http.statusCode,
-                                         body: String(data: data, encoding: .utf8) ?? "")
+        do {
+            return try await Retry.run(attempts: maxAttempts, shouldRetry: Self.isTransient) {
+                let (data, response) = try await URLSession.shared.data(for: request)
+                if let http = response as? HTTPURLResponse, !(200...299).contains(http.statusCode) {
+                    throw ProviderError.http(status: http.statusCode,
+                                             body: String(data: data, encoding: .utf8) ?? "")
+                }
+                guard let json = try JSONSerialization.jsonObject(with: data) as? [String: Any],
+                      let raw = json["embeddings"] as? [[Any]] else {
+                    throw ProviderError.malformedResponse("no embeddings array")
+                }
+                return raw.map { vector in
+                    vector.compactMap { ($0 as? NSNumber)?.floatValue }
+                }
             }
-            guard let json = try JSONSerialization.jsonObject(with: data) as? [String: Any],
-                  let raw = json["embeddings"] as? [[Any]] else {
-                throw ProviderError.malformedResponse("no embeddings array")
-            }
-            return raw.map { vector in
-                vector.compactMap { ($0 as? NSNumber)?.floatValue }
-            }
+        } catch ProviderError.http(let status, let body)
+                    where ProviderError.isOllamaModelMissing(status: status, body: body) {
+            // Surface the "pull the model" remedy instead of a raw 404, so the
+            // caller can abort the run / query with an actionable message.
+            throw ProviderError.ollamaModelMissing(model: model)
         }
     }
 

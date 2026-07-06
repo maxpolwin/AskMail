@@ -46,6 +46,15 @@ final class AskViewModel: ObservableObject {
                 }
                 answer = rendered.text
                 sources = rendered.sources
+            } catch let error as ProviderError {
+                RollingLog.shared.log("query failed: \(error)", level: .error)
+                // The missing-model message is already a full, actionable
+                // sentence — show it as-is rather than burying it after a prefix.
+                if case .ollamaModelMissing = error {
+                    warning = "\(error)"
+                } else {
+                    warning = "Query failed: \(error)"
+                }
             } catch {
                 RollingLog.shared.log("query failed: \(error)", level: .error)
                 warning = "Query failed: \(error)"

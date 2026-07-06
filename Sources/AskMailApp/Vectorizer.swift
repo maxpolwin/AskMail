@@ -95,11 +95,17 @@ final class Vectorizer: ObservableObject {
                 "\(trigger.rawValue) vectorize done: \(summary.ingested) new, "
                 + "\(summary.skipped) unchanged, \(summary.failed) failed", level: .info)
             return summary
-        } catch is IngestError {
-            // Backend went unreachable mid-run; already-done work is saved and
-            // the rest retries next run. Give a specific, actionable message.
-            RollingLog.shared.log("\(trigger.rawValue) vectorize stopped: Ollama unreachable")
-            status = "Stopped: Ollama isn\u{2019}t running. Start it (\u{2018}ollama serve\u{2019}), then Vectorize now \u{2014} it resumes where it left off."
+        } catch let error as IngestError {
+            // A setup problem stopped the run before it could fail every message.
+            // Already-done work is saved; the rest resumes once it's fixed.
+            switch error {
+            case .embedderUnreachable:
+                RollingLog.shared.log("\(trigger.rawValue) vectorize stopped: Ollama unreachable")
+                status = "Stopped: Ollama isn\u{2019}t running. Start it (\u{2018}ollama serve\u{2019}), then Vectorize now \u{2014} it resumes where it left off."
+            case .embeddingModelMissing(let model):
+                RollingLog.shared.log("\(trigger.rawValue) vectorize stopped: embedding model \(model) not installed", level: .error)
+                status = "Stopped: the embedding model \u{2018}\(model)\u{2019} isn\u{2019}t installed. Run \u{2018}ollama pull \(model)\u{2019} in Terminal, then Vectorize now \u{2014} it resumes where it left off."
+            }
             return nil
         } catch {
             RollingLog.shared.log("\(trigger.rawValue) vectorize failed: \(error)", level: .error)
@@ -156,9 +162,15 @@ final class Vectorizer: ObservableObject {
             RollingLog.shared.log(
                 "retry vectorize done: \(summary.ingested) now ok, \(summary.failed) still failing", level: .info)
             return summary
-        } catch is IngestError {
-            RollingLog.shared.log("retry vectorize stopped: Ollama unreachable", level: .error)
-            status = "Stopped: Ollama isn\u{2019}t running. Start it (\u{2018}ollama serve\u{2019}), then retry \u{2014} it resumes where it left off."
+        } catch let error as IngestError {
+            switch error {
+            case .embedderUnreachable:
+                RollingLog.shared.log("retry vectorize stopped: Ollama unreachable", level: .error)
+                status = "Stopped: Ollama isn\u{2019}t running. Start it (\u{2018}ollama serve\u{2019}), then retry \u{2014} it resumes where it left off."
+            case .embeddingModelMissing(let model):
+                RollingLog.shared.log("retry vectorize stopped: embedding model \(model) not installed", level: .error)
+                status = "Stopped: the embedding model \u{2018}\(model)\u{2019} isn\u{2019}t installed. Run \u{2018}ollama pull \(model)\u{2019} in Terminal, then retry \u{2014} it resumes where it left off."
+            }
             return nil
         } catch {
             RollingLog.shared.log("retry vectorize failed: \(error)", level: .error)
