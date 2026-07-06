@@ -1,5 +1,23 @@
+import AppKit
 import AskMailCore
 import SwiftUI
+
+/// One source rendered as "N  domain (date): subject" — shared by the on-screen
+/// row and the clipboard export so the two presentations never drift.
+func formatSource(_ number: Int, _ ref: SourceRef) -> String {
+    "\(number)  \(MailHeader.domain(fromSender: ref.sender)) "
+        + "(\(PromptAssembler.ymd(ref.dateUnix))): \(MailHeader.decode(ref.subject))"
+}
+
+/// The model answers in Markdown (`**bold**`, `*italic*`, `` `code` ``). Parse
+/// it inline-only so emphasis renders while newlines are preserved verbatim —
+/// block reflow would fight the streamed, line-oriented answer.
+func answerMarkdown(_ text: String) -> AttributedString {
+    (try? AttributedString(
+        markdown: text,
+        options: .init(interpretedSyntax: .inlineOnlyPreservingWhitespace)))
+        ?? AttributedString(text)
+}
 
 @MainActor
 final class AskViewModel: ObservableObject {
@@ -63,6 +81,18 @@ final class AskViewModel: ObservableObject {
         }
     }
 
+    /// The answer plus a plain-text source list, for the clipboard. Mirrors the
+    /// card: the answer (with its citation superscripts), a blank line, then
+    /// "Sources" and one "N  domain (date): subject" line per source.
+    func clipboardText() -> String {
+        var out = String(answerMarkdown(answer).characters)  // strip ** etc.
+        if !sources.isEmpty {
+            out += "\n\n\(Defaults.sourcesListLabel)\n"
+            out += sources.map { formatSource($0.number, $0.ref) }.joined(separator: "\n")
+        }
+        return out
+    }
+
     func endSession() {
         currentTask?.cancel()
         queryService?.clearSession()
@@ -95,6 +125,7 @@ struct AskView: View {
     var onDismiss: () -> Void = {}
 
     @State private var answerHeight: CGFloat = 0
+    @State private var copied = false
     private let maxAnswerHeight: CGFloat = 320
 
     var body: some View {
@@ -130,32 +161,27 @@ struct AskView: View {
 
             // Present only when there's something to show — otherwise the card
             // ends at the hairline. Grows with content up to a cap, then scrolls.
+            // Answer and sources are one selectable Text so a drag-selection can
+            // span both and ⌘C grabs everything; the source lines carry link
+            // attributes, so they stay clickable.
             if !model.answer.isEmpty || !model.sources.isEmpty {
                 ScrollView {
-                    VStack(alignment: .leading, spacing: 12) {
-                        if !model.answer.isEmpty {
-                            Text(model.answer)
-                                .font(.system(size: 14))
-                                .textSelection(.enabled)
-                                .frame(maxWidth: .infinity, alignment: .leading)
-                        }
-                        if !model.sources.isEmpty {
-                            Divider()
-                            Text(Defaults.sourcesListLabel)
-                                .font(.caption.weight(.semibold))
-                                .foregroundStyle(.secondary)
-                            ForEach(model.sources, id: \.number) { source in
-                                sourceRow(source.number, source.ref)
-                            }
-                        }
-                    }
-                    .frame(maxWidth: .infinity, alignment: .leading)
-                    .background(GeometryReader { geo in
-                        Color.clear.preference(key: ContentHeightKey.self, value: geo.size.height)
-                    })
+                    Text(combinedOutput)
+                        .font(.system(size: 14))
+                        .textSelection(.enabled)
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                        .contextMenu { Button("Copy") { copyOutput() } }
+                        .background(GeometryReader { geo in
+                            Color.clear.preference(key: ContentHeightKey.self, value: geo.size.height)
+                        })
                 }
                 .frame(height: min(answerHeight, maxAnswerHeight))
                 .onPreferenceChange(ContentHeightKey.self) { answerHeight = $0 }
+                .overlay(alignment: .topTrailing) { copiedToast }
+                // Auto-copy the finished response; the toast confirms it.
+                .onChange(of: model.isStreaming) { _, streaming in
+                    if !streaming, !model.answer.isEmpty { copyOutput() }
+                }
             }
         }
         .padding(16)
@@ -168,16 +194,65 @@ struct AskView: View {
         .shadow(color: .black.opacity(0.28), radius: 20, x: 0, y: 10)
     }
 
+    /// Answer + sources as one selectable, partly-linked string. The answer's
+    /// citation superscripts are tinted to the system accent; the "Sources"
+    /// heading is a quiet caption; each source line is accent-coloured and
+    /// carries a `message://` link, so it opens on click yet still selects and
+    /// copies as text.
+    private var combinedOutput: AttributedString {
+        var out = answerMarkdown(model.answer)
+        for index in out.characters.indices where Self.superscriptDigits.contains(out.characters[index]) {
+            out[index..<out.characters.index(after: index)].foregroundColor = Theme.accent
+        }
+        guard !model.sources.isEmpty else { return out }
+
+        out += AttributedString("\n\n")
+        var heading = AttributedString(Defaults.sourcesListLabel + "\n")
+        heading.font = .caption.weight(.semibold)
+        heading.foregroundColor = .secondary
+        out += heading
+
+        for (offset, source) in model.sources.enumerated() {
+            var line = AttributedString(formatSource(source.number, source.ref))
+            line.font = .callout
+            line.foregroundColor = Theme.accent
+            line.link = CitationRenderer.messageURL(messageID: source.ref.messageID)
+            out += line
+            if offset < model.sources.count - 1 { out += AttributedString("\n") }
+        }
+        return out
+    }
+
+    /// Transient "Copied" pill in the top-right of the output, shown after an
+    /// auto-copy or a manual copy, then it fades on its own.
     @ViewBuilder
-    private func sourceRow(_ number: Int, _ ref: SourceRef) -> some View {
-        if let url = CitationRenderer.messageURL(messageID: ref.messageID) {
-            Link(destination: url) {
-                Text("\(number)  \(ref.subject) \u{2014} \(ref.sender), \(PromptAssembler.ymd(ref.dateUnix))")
-                    .font(.callout)
-                    .lineLimit(1)
-            }
+    private var copiedToast: some View {
+        if copied {
+            Text("Copied")
+                .font(.caption2.weight(.medium))
+                .foregroundStyle(.secondary)
+                .padding(.horizontal, 8)
+                .padding(.vertical, 3)
+                .background(.ultraThinMaterial, in: Capsule())
+                .overlay(Capsule().strokeBorder(Theme.hairline, lineWidth: 0.5))
+                .padding(6)
+                .transition(.opacity.combined(with: .move(edge: .top)))
         }
     }
+
+    private func copyOutput() {
+        NSPasteboard.general.clearContents()
+        NSPasteboard.general.setString(model.clipboardText(), forType: .string)
+        withAnimation(.easeOut(duration: 0.15)) { copied = true }
+        Task { @MainActor in
+            try? await Task.sleep(nanoseconds: 1_500_000_000)
+            withAnimation(.easeIn(duration: 0.3)) { copied = false }
+        }
+    }
+
+    private static let superscriptDigits: Set<Character> =
+        ["\u{2070}", "\u{00b9}", "\u{00b2}", "\u{00b3}", "\u{2074}",
+         "\u{2075}", "\u{2076}", "\u{2077}", "\u{2078}", "\u{2079}"]
 }
 
 /// Reports the intrinsic height of the answer/sources stack so the scroll area
