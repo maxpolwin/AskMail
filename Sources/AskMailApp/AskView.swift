@@ -229,6 +229,7 @@ struct AskView: View {
 
     @State private var answerHeight: CGFloat = 0
     @State private var copied = false
+    @State private var hoveringCard = false
     private let maxAnswerHeight: CGFloat = 320
 
     var body: some View {
@@ -309,7 +310,28 @@ struct AskView: View {
             RoundedRectangle(cornerRadius: 16, style: .continuous)
                 .strokeBorder(Theme.hairline, lineWidth: 0.5)
         )
+        .overlay(alignment: .topTrailing) { closeButton }
         .shadow(color: .black.opacity(0.28), radius: 20, x: 0, y: 10)
+        .onHover { hoveringCard = $0 }
+    }
+
+    /// A quiet ✕ in the top-right corner, revealed on hover over the panel so
+    /// it's obvious how to dismiss (Esc still works too). No chrome — the glyph
+    /// only, in muted colour. Hidden and non-interactive until hovered.
+    @ViewBuilder
+    private var closeButton: some View {
+        Button(action: onDismiss) {
+            Image(systemName: "xmark")
+                .font(.system(size: 12, weight: .medium))
+                .foregroundStyle(.secondary)
+                .padding(10)
+                .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
+        .accessibilityLabel("Close")
+        .opacity(hoveringCard ? 1 : 0)
+        .allowsHitTesting(hoveringCard)
+        .animation(.easeOut(duration: 0.12), value: hoveringCard)
     }
 
     /// The Markdown answer with its citation superscripts tinted to the system
