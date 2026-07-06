@@ -15,6 +15,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
     func applicationDidFinishLaunching(_ notification: Notification) {
         RollingLog.shared.log("app launched", level: .info)
+
+        // macOS 26 (Tahoe) auto-adds system icons to menu items (Settings,
+        // Quit, ...). Opt out before any menu is built. `set` (app domain), not
+        // `register` (lowest-priority registration domain, which the system's
+        // global default overrides) — the per-app `NSMenuEnableActionImages NO`.
+        UserDefaults.standard.set(false, forKey: "NSMenuEnableActionImages")
+
         let panel = PanelController()
         self.panel = panel
 
@@ -77,11 +84,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     }
 
     private func setUpStatusItem() {
-        // macOS 26 (Tahoe) auto-adds system icons to standard menu items
-        // (Settings, Quit, ...). Opt this app's menus out; this is a
-        // per-app equivalent of `defaults write -g NSMenuEnableActionImages NO`.
-        UserDefaults.standard.register(defaults: ["NSMenuEnableActionImages": false])
-
         let item = NSStatusBar.system.statusItem(withLength: NSStatusItem.squareLength)
         item.button?.image = Self.hairlineStatusIcon()
         item.button?.setAccessibilityLabel("AskMail")
