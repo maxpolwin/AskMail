@@ -8,8 +8,9 @@ public enum CitationRenderer {
     public struct Rendered: Sendable, Equatable {
         /// Answer text with `[N]` markers replaced by superscript digits.
         public var text: String
-        /// Sources actually cited, ascending by number; the numbers match the
-        /// in-text superscripts exactly (numbering is per distinct email).
+        /// Sources actually cited, renumbered 1…M in order of first appearance
+        /// in the answer; the numbers match the in-text superscripts exactly.
+        /// Order is reading order, independent of each source's relevance.
         public var sources: [(number: Int, ref: SourceRef)]
         /// Markers the model emitted with no matching source (dropped, log them).
         public var droppedMarkers: [Int]
@@ -25,38 +26,56 @@ public enum CitationRenderer {
     public static func render(answer: String, sourceMap: [Int: SourceRef]) -> Rendered {
         // A single bracket may cite several sources: [1], [4,6], [4, 6].
         let regex = try! NSRegularExpression(pattern: "\\[\\s*(\\d+(?:\\s*,\\s*\\d+)*)\\s*\\]")
-        var text = answer
-        var used = Set<Int>()
-        var dropped: [Int] = []
+        let matches = regex.matches(in: answer, range: NSRange(answer.startIndex..., in: answer))
 
-        let matches = regex.matches(in: text, range: NSRange(text.startIndex..., in: text))
-        for match in matches.reversed() {
-            guard let full = Range(match.range, in: text),
-                  let group = Range(match.range(at: 1), in: text) else { continue }
-            let numbers = text[group]
-                .split(separator: ",")
+        // The numbers inside one marker, parsed from the original answer.
+        func markerNumbers(_ match: NSTextCheckingResult) -> [Int] {
+            guard let group = Range(match.range(at: 1), in: answer) else { return [] }
+            return answer[group].split(separator: ",")
                 .compactMap { Int($0.trimmingCharacters(in: .whitespaces)) }
-            // Absorb one preceding space so the citation sits immediately after
-            // the word it follows (§6), and a fully-dropped marker leaves no
-            // hanging space.
+        }
+
+        // Pass 1 (forward): renumber cited sources 1…M by first appearance in
+        // the answer — reading order, not retrieval rank — so the list has no
+        // gaps. The model's original numbers (fused-rank) map to these.
+        var renumbered: [Int: Int] = [:]
+        var sources: [(number: Int, ref: SourceRef)] = []
+        var dropped: [Int] = []
+        for match in matches {
+            for original in markerNumbers(match) {
+                guard let ref = sourceMap[original] else { dropped.append(original); continue }
+                if renumbered[original] == nil {
+                    renumbered[original] = sources.count + 1
+                    sources.append((number: sources.count + 1, ref: ref))
+                }
+            }
+        }
+
+        // Pass 2 (reverse): swap each marker for its renumbered superscripts.
+        // Reverse keeps earlier match ranges valid as later text is replaced.
+        var text = answer
+        for match in matches.reversed() {
+            guard let full = Range(match.range, in: text) else { continue }
+            var seen = Set<Int>()
+            let newNumbers = markerNumbers(match)
+                .compactMap { renumbered[$0] }
+                .filter { seen.insert($0).inserted }
+            // Absorb one preceding space so the citation hugs the word, and a
+            // fully-dropped marker leaves no hanging space.
             var lower = full.lowerBound
             if lower > text.startIndex, text[text.index(before: lower)] == " " {
                 lower = text.index(before: lower)
             }
-            let valid = numbers.filter { sourceMap[$0] != nil }
-            dropped.append(contentsOf: numbers.filter { sourceMap[$0] == nil })
-            if valid.isEmpty {
+            if newNumbers.isEmpty {
                 text.replaceSubrange(lower..<full.upperBound, with: "")
             } else {
-                valid.forEach { used.insert($0) }
-                // Multiple numbers render as a thin-spaced cluster: ⁴ ⁶.
-                let cluster = valid.map(superscript).joined(separator: "\u{2009}")
+                // Multiple numbers render as a thin-spaced cluster: ¹ ².
+                let cluster = newNumbers.map(superscript).joined(separator: "\u{2009}")
                 text.replaceSubrange(lower..<full.upperBound, with: cluster)
             }
         }
 
-        let sources = used.sorted().map { (number: $0, ref: sourceMap[$0]!) }
-        return Rendered(text: text, sources: sources, droppedMarkers: dropped.reversed())
+        return Rendered(text: text, sources: sources, droppedMarkers: dropped)
     }
 
     // MARK: Superscripts

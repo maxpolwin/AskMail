@@ -66,7 +66,7 @@ Each fused chunk is rendered as a delimited unit. Numbers `[1], [2], ...` are as
 ```
 
 Rules:
-- Two chunks from the same email **share the same number**; the map `N -> message_id` is therefore one-to-one, and the in-text superscripts always match the source list (Section 6) with no gaps and no renumbering.
+- Two chunks from the same email **share the same number**; the map `N -> message_id` is therefore one-to-one. These assembly numbers are what the model sees and cites; the panel renumbers the *cited* subset for display (Section 6).
 - Assign numbers **after** the token-budget trim (Section 2), so dropped chunks never leave holes in the numbering.
 - `date` is the converted Unix date rendered `YYYY-MM-DD` (Cocoa-epoch conversion already done at ingestion, Section B4).
 - Order strictly by fused rank; do not re-sort by date. Recency is handled by the date-filter preprocessing (B6 step 5), not by context ordering.
@@ -114,7 +114,9 @@ Do not split context into a separate system message; keeping it in the user turn
 
 The model outputs plain `[N]` markers. The panel post-processes the streamed answer before display:
 
-**In-text:** replace each `[N]` with a superscript number (¹²³ ...) rendered as an `AttributedString` link. Tapping the superscript opens the mapped email directly via `message://<Message-ID>` (Section B8, URL-encoded angle brackets `%3C`/`%3E`). The superscript sits immediately after the word it follows, matching footnote-style citation so each statement or figure links to its exact source.
+The model's markers carry the assembly numbers (Section 3), but only a subset of sources end up cited, in an order that need not be `1, 2, 3`. So the panel first **renumbers the cited sources `1…M` by first appearance in the answer** (reading order), then renders both the superscripts and the list with those display numbers. Reading order is independent of relevance — a source cited third can still show the strongest relevance bar.
+
+**In-text:** replace each marker with the renumbered superscript(s) (¹²³ ...) rendered as an `AttributedString` link. A marker may cite several sources — `[4,6]`, `[4, 6]` — and renders as a thin-spaced cluster (¹ ²); unknown numbers inside a marker drop while the valid ones stay. Tapping the superscript opens the mapped email directly via `message://<Message-ID>` (Section B8, URL-encoded angle brackets `%3C`/`%3E`). The superscript sits immediately after the word it follows, matching footnote-style citation so each statement or figure links to its exact source.
 
 **Below the answer:** a numbered "Sources" list, one entry per distinct source email, each entry itself a tappable `message://` link showing subject, sender, and date:
 
@@ -124,7 +126,7 @@ Sources
 2  {subject} — {sender}, {YYYY-MM-DD}
 ```
 
-Because numbers are assigned per distinct email (Section 3), the list numbers match the in-text superscripts exactly with no de-duplication step: ¹ in the answer and `1` in the list resolve to the same email. Both are live links; the user can jump from either.
+Display numbers are contiguous `1…M` with no gaps, even when the model's assembly numbers skip (an uncited or dropped source leaves no number). ¹ in the answer and `1` in the list resolve to the same email; the list is ordered by first appearance. Both are live links; the user can jump from either.
 
 Implementation notes:
 - Do the `[N]` to superscript substitution on the completed answer, not mid-stream, to avoid partial-marker flicker while tokens arrive.

@@ -174,12 +174,26 @@ final class CitationRendererTests: XCTestCase {
         XCTAssertTrue(rendered.droppedMarkers.isEmpty)
     }
 
-    // Within a combined marker, unknown numbers drop and the valid ones stay.
+    // Within a combined marker, unknown numbers drop and the valid ones stay
+    // (2 is the only cited source, so it renumbers to 1).
     func testCombinedCitationPartialDrop() {
         let rendered = CitationRenderer.render(answer: "Claim [2,9].", sourceMap: map)
-        XCTAssertEqual(rendered.text, "Claim\u{00b2}.")
+        XCTAssertEqual(rendered.text, "Claim\u{00b9}.")
         XCTAssertEqual(rendered.droppedMarkers, [9])
-        XCTAssertEqual(rendered.sources.map(\.number), [2])
+        XCTAssertEqual(rendered.sources.map(\.number), [1])
+        XCTAssertEqual(rendered.sources.map(\.ref.messageID), ["b@x"])
+    }
+
+    // Cited sources are renumbered by first appearance in the answer, not by
+    // their original retrieval-rank numbers — so the list reads 1, 2 with no
+    // gaps even when the model cites the second source first.
+    func testRenumbersByAppearance() {
+        let rendered = CitationRenderer.render(
+            answer: "Second source first [2]. Then the first [1].", sourceMap: map)
+        XCTAssertEqual(rendered.text,
+                       "Second source first\u{00b9}. Then the first\u{00b2}.")
+        XCTAssertEqual(rendered.sources.map(\.number), [1, 2])
+        XCTAssertEqual(rendered.sources.map(\.ref.messageID), ["b@x", "a@x"])
     }
 
     func testMultiDigitSuperscript() {
