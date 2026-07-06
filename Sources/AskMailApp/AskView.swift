@@ -236,8 +236,9 @@ struct AskView: View {
     }
 
     /// One source: the accent-coloured, clickable, selectable line, then a
-    /// relevance bar scaled to the strongest source in this answer. Hover the
-    /// bar for the exact figure; it's also carried into copied text.
+    /// relevance bar scaled to the strongest source in this answer. The whole
+    /// row shows the exact figure on hover (the 5 pt bar alone is too small a
+    /// target); it's also carried into copied text.
     @ViewBuilder
     private func sourceRow(_ number: Int, _ ref: SourceRef, percent: Int?) -> some View {
         HStack(spacing: 8) {
@@ -247,9 +248,10 @@ struct AskView: View {
             Spacer(minLength: 8)
             if let percent {
                 RelevanceBar(fraction: Double(percent) / 100)
-                    .help("Relevance \(percent)% \u{00B7} RRF \(String(format: "%.4f", ref.relevance ?? 0))")
             }
         }
+        .contentShape(Rectangle())  // make the whole row (incl. gaps) hoverable
+        .help(percent.map { "Relevance \($0)% \u{00B7} RRF \(String(format: "%.4f", ref.relevance ?? 0))" } ?? "")
     }
 
     /// The source line as an attributed string: accent-coloured with a
