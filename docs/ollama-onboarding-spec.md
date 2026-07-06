@@ -90,7 +90,7 @@ to embed and later cite — a correctness problem, and ~90% wasted work.
   `embeddingModel = "nomic-embed-text"`, `localChatModel = "qwen2.5:7b"`,
   `ollamaLocalHost = http://localhost:11434`.
 - Chat model path: `QueryService` builds providers from `QuerySettings` in
-  `Sources/AskMailCore/QueryService.swift:167`
+  `Sources/AskMailCore/QueryService.swift:162`
   (`OllamaClient(host: settings.ollamaHost, model: settings.localModel)`), but
   `SettingsStore.querySettings()` (`Sources/AskMailApp/SettingsStore.swift`)
   never passes `localModel`, so it is stuck at the default. `ProviderChoice`
