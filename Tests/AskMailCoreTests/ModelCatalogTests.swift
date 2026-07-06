@@ -90,6 +90,41 @@ final class ModelCatalogTests: XCTestCase {
         XCTAssertFalse(groups.selectable[0].label.contains("not installed"))
     }
 
+    func testRemoteListGroupingWithEmptyCatalogAndCustomSuffix() {
+        // Remote providers (ollama.com tags, Mistral /v1/models) reuse the
+        // same grouping with no curated catalog: every listed model is
+        // selectable, nothing is downloadable, and an absent selection is
+        // flagged with remote-appropriate wording.
+        let listed = [
+            InstalledModel(name: "glm-4.7", sizeBytes: 0),
+            InstalledModel(name: "kimi-k2.5", sizeBytes: 0),
+        ]
+        let groups = ModelCatalog.pickerGroups(kind: .chat, catalog: [],
+                                               installed: listed,
+                                               selected: "qwen3.5:cloud",
+                                               unavailableSuffix: "not in the current list")
+        XCTAssertEqual(groups.selectable.map(\.id),
+                       ["glm-4.7", "kimi-k2.5", "qwen3.5:cloud"])
+        XCTAssertEqual(groups.selectable.last?.label,
+                       "qwen3.5:cloud (not in the current list)")
+        XCTAssertTrue(groups.downloadable.isEmpty)
+    }
+
+    func testMistralModelListDecoding() throws {
+        // OpenAI-style list; aliases repeat models under multiple ids, so the
+        // decoder dedupes and sorts for a stable picker.
+        let json = """
+        {"object":"list","data":[
+          {"id":"mistral-large-latest","object":"model"},
+          {"id":"mistral-small-latest","object":"model"},
+          {"id":"mistral-large-latest","object":"model"}
+        ]}
+        """.data(using: .utf8)!
+        XCTAssertEqual(try MistralClient.parseModels(json),
+                       ["mistral-large-latest", "mistral-small-latest"])
+        XCTAssertThrowsError(try MistralClient.parseModels(Data("{}".utf8)))
+    }
+
     func testShippedCatalogIsCoherent() {
         // The registry the app actually ships: right kinds, the defaults
         // present, dimensions on every embedding entry (Phase-3 stamp

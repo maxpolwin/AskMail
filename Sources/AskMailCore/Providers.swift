@@ -298,6 +298,29 @@ public struct MistralClient: ChatProvider {
     }
 }
 
+extension MistralClient {
+    /// Model ids available to the account, for the Settings picker
+    /// (`GET /v1/models`; requires the API key).
+    public static func availableModels(apiKey: String,
+                                       endpoint: URL = URL(string: "https://api.mistral.ai/v1/models")!) async throws -> [String] {
+        var request = URLRequest(url: endpoint, timeoutInterval: 10)
+        request.setValue("Bearer \(apiKey)", forHTTPHeaderField: "Authorization")
+        let (data, response) = try await URLSession.shared.data(for: request)
+        try OllamaControl.ensureOK(response: response, data: data)
+        return try parseModels(data)
+    }
+
+    /// Pure decoder for the OpenAI-style `{"data":[{"id":…}]}` list. The list
+    /// repeats models under alias ids, so dedupe; sorted for a stable picker.
+    public static func parseModels(_ data: Data) throws -> [String] {
+        guard let json = try JSONSerialization.jsonObject(with: data) as? [String: Any],
+              let list = json["data"] as? [[String: Any]] else {
+            throw ProviderError.malformedResponse("no data array in /v1/models")
+        }
+        return Array(Set(list.compactMap { $0["id"] as? String })).sorted()
+    }
+}
+
 // MARK: - Router with local fallback (FR-4)
 
 /// Events surfaced to the panel while an answer streams.

@@ -95,7 +95,8 @@ public enum ModelCatalog {
     public static func pickerGroups(kind: ModelOption.Kind,
                                     catalog: [ModelOption]? = nil,
                                     installed: [InstalledModel],
-                                    selected: String) -> PickerGroups {
+                                    selected: String,
+                                    unavailableSuffix: String = "not installed") -> PickerGroups {
         let options = catalog ?? (kind == .chat ? chat : embedding)
         var selectable: [PickerChoice] = []
         var downloadable: [ModelOption] = []
@@ -117,7 +118,7 @@ public enum ModelCatalog {
 
         if !selectable.contains(where: { $0.id == selected }) {
             selectable.append(PickerChoice(id: selected,
-                                           label: "\(selected) (not installed)"))
+                                           label: "\(selected) (\(unavailableSuffix))"))
         }
         return PickerGroups(selectable: selectable, downloadable: downloadable)
     }

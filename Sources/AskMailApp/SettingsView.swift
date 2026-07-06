@@ -8,6 +8,7 @@ struct SettingsView: View {
     @ObservedObject private var settings = SettingsStore.shared
     @ObservedObject private var vectorizer = Vectorizer.shared
     @ObservedObject private var engine = OllamaEngine.shared
+    @ObservedObject private var remote = RemoteModelDirectory.shared
     @State private var ollamaCloudKey = ""
     @State private var mistralKey = ""
     @State private var keysStatus = ""
@@ -148,11 +149,36 @@ struct SettingsView: View {
                     Text("Mistral API").tag(ProviderChoice.mistral)
                 }
 
-                modelPicker(title: "Chat model", kind: .chat,
-                            selection: $settings.localChatModel)
-                Text("Used for local answers, and as the fallback when a cloud provider fails.")
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
+                switch settings.provider {
+                case .ollamaLocal:
+                    modelPicker(title: "Chat model", kind: .chat,
+                                selection: $settings.localChatModel)
+                    Text("Runs on this Mac via Ollama.")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                case .ollamaCloud:
+                    remotePicker(title: "Cloud model",
+                                 models: remote.cloudModels,
+                                 selection: $settings.cloudChatModel,
+                                 note: remote.cloudNote)
+                    modelPicker(title: "Fallback model", kind: .chat,
+                                selection: $settings.localChatModel)
+                    Text("The local model answers when the cloud provider fails.")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                case .mistral:
+                    remotePicker(title: "Mistral model",
+                                 models: remote.mistralModels.map {
+                                     InstalledModel(name: $0, sizeBytes: 0)
+                                 },
+                                 selection: $settings.mistralModel,
+                                 note: remote.mistralNote)
+                    modelPicker(title: "Fallback model", kind: .chat,
+                                selection: $settings.localChatModel)
+                    Text("The local model answers when the cloud provider fails.")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                }
 
                 modelPicker(title: "Embedding model", kind: .embedding,
                             selection: $settings.embeddingModel)
@@ -222,6 +248,10 @@ struct SettingsView: View {
             launchAtLogin = LoginItem.isEnabled   // reflect external changes
             vectorizer.refreshFailedCount()
             Task { await engine.refresh() }
+            Task { await remote.refresh(for: settings.provider) }
+        }
+        .onChange(of: settings.provider) { _, provider in
+            Task { await remote.refresh(for: provider) }
         }
         .alert("Export debug logs?", isPresented: $showExportLogsWarning) {
             Button("Export\u{2026}", role: .destructive) { exportLogs() }
@@ -305,6 +335,26 @@ struct SettingsView: View {
         }
     }
 
+    /// A remote provider's picker: rows come straight from the provider's live
+    /// model list (ollama.com tags / Mistral /v1/models); the current choice
+    /// stays visible and flagged when it's absent from that list.
+    @ViewBuilder
+    private func remotePicker(title: String, models: [InstalledModel],
+                              selection: Binding<String>, note: String) -> some View {
+        let groups = ModelCatalog.pickerGroups(kind: .chat, catalog: [],
+                                               installed: models,
+                                               selected: selection.wrappedValue,
+                                               unavailableSuffix: "not in the current list")
+        Picker(title, selection: selection) {
+            ForEach(groups.selectable) { choice in
+                Text(choice.label).tag(choice.id)
+            }
+        }
+        if !note.isEmpty {
+            Text(note).font(.caption).foregroundStyle(.secondary)
+        }
+    }
+
     /// Writes only the non-empty fields, verifies each Keychain write, and
     /// reports the real outcome next to the button. Never claims success when
     /// nothing was entered or when SecItemAdd fails.
@@ -335,6 +385,9 @@ struct SettingsView: View {
             keysStatus = "Enter a key first \u{2014} nothing to save."
         } else if failed.isEmpty {
             keysStatus = "Saved to Keychain: \(saved.joined(separator: ", "))."
+            // A fresh key may unlock the remote model list for the current
+            // provider's picker.
+            Task { await remote.refresh(for: settings.provider) }
         } else {
             let ok = saved.isEmpty ? "" : "Saved: \(saved.joined(separator: ", ")). "
             // Show the real OSStatus reason; a stale item from an earlier build's

@@ -18,6 +18,14 @@ final class SettingsStore: ObservableObject {
     @Published var localChatModel: String {
         didSet { defaults.set(localChatModel, forKey: "localChatModel") }
     }
+    /// Ollama Cloud chat model, picked from the live ollama.com list.
+    @Published var cloudChatModel: String {
+        didSet { defaults.set(cloudChatModel, forKey: "cloudChatModel") }
+    }
+    /// Mistral chat model, picked from the account's /v1/models list.
+    @Published var mistralModel: String {
+        didSet { defaults.set(mistralModel, forKey: "mistralModel") }
+    }
     /// Local Ollama embedding model. Changing it invalidates the vector index
     /// (vectors from different models don't mix) — the swap flow handles that.
     @Published var embeddingModel: String {
@@ -67,6 +75,8 @@ final class SettingsStore: ObservableObject {
     private init() {
         provider = ProviderChoice(rawValue: defaults.string(forKey: "provider") ?? "") ?? .ollamaLocal
         localChatModel = defaults.string(forKey: "localChatModel") ?? Defaults.localChatModel
+        cloudChatModel = defaults.string(forKey: "cloudChatModel") ?? Defaults.cloudChatModel
+        mistralModel = defaults.string(forKey: "mistralModel") ?? Defaults.mistralChatModel
         embeddingModel = defaults.string(forKey: "embeddingModel") ?? Defaults.embeddingModel
         systemPrompt = defaults.string(forKey: "systemPrompt") ?? Defaults.defaultSystemPrompt
         let contextLimit = defaults.integer(forKey: "contextTokenLimit")
@@ -113,7 +123,9 @@ final class SettingsStore: ObservableObject {
                       systemPrompt: systemPrompt,
                       contextTokenLimit: contextTokenLimit,
                       answerTokenLimit: answerTokenLimit,
-                      localModel: localChatModel)
+                      localModel: localChatModel,
+                      cloudModel: cloudChatModel,
+                      mistralModel: mistralModel)
     }
 
     static var databasePath: String {

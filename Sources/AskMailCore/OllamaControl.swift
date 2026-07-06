@@ -69,13 +69,25 @@ public protocol OllamaControlling: Sendable {
     func pull(_ id: String) -> AsyncThrowingStream<PullProgress, Error>
 }
 
-/// Concrete client over the local daemon. Local host only — model management
-/// never involves a cloud endpoint (SECURITY.md).
+/// Concrete client over the local daemon. Model *management* (start, pull)
+/// is local-only; the same /api/tags shape is also served by ollama.com, so
+/// with the cloud host this client lists available cloud models — model
+/// metadata only, never mail content (SECURITY.md).
 public struct OllamaControl: OllamaControlling {
     public var host: URL
+    /// Bearer token for the cloud host; nil for the local daemon.
+    public var apiKey: String?
 
-    public init(host: URL = Defaults.ollamaLocalHost) {
+    public init(host: URL = Defaults.ollamaLocalHost, apiKey: String? = nil) {
         self.host = host
+        self.apiKey = apiKey
+    }
+
+    private func authorized(_ request: URLRequest) -> URLRequest {
+        guard let apiKey else { return request }
+        var request = request
+        request.setValue("Bearer \(apiKey)", forHTTPHeaderField: "Authorization")
+        return request
     }
 
     public func reachable() async -> Bool {
@@ -87,8 +99,8 @@ public struct OllamaControl: OllamaControlling {
     }
 
     public func installedModels() async throws -> [InstalledModel] {
-        let request = URLRequest(url: host.appendingPathComponent("api/tags"),
-                                 timeoutInterval: 5)
+        let request = authorized(URLRequest(url: host.appendingPathComponent("api/tags"),
+                                            timeoutInterval: 5))
         let (data, response) = try await URLSession.shared.data(for: request)
         try Self.ensureOK(response: response, data: data)
         return try Self.parseTags(data)
