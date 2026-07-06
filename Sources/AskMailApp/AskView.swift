@@ -127,10 +127,18 @@ final class AskViewModel: ObservableObject {
 
     private var queryService: QueryService?
     private var currentTask: Task<Void, Never>?
+    /// Bumped on every submit (and on dismiss). A query task only writes state
+    /// while its captured generation is still current, so a run superseded by a
+    /// resubmission (or a dismiss) drops its late results silently.
+    private var generation = 0
 
     func submit() {
         let text = question.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !text.isEmpty, !isStreaming else { return }
+        guard !text.isEmpty else { return }
+        // A resubmission supersedes any in-flight query: cancel it and rerun.
+        currentTask?.cancel()
+        generation += 1
+        let gen = generation
         answer = ""
         sources = []
         warning = nil
@@ -142,6 +150,7 @@ final class AskViewModel: ObservableObject {
                 let result = try await service.ask(text, settings: SettingsStore.shared.querySettings())
                 var raw = ""
                 for try await event in result.events {
+                    guard gen == generation else { return }  // superseded by a newer run
                     switch event {
                     case .token(let token):
                         raw += token
@@ -154,6 +163,7 @@ final class AskViewModel: ObservableObject {
                         break
                     }
                 }
+                guard gen == generation else { return }
                 // Post-process the completed answer, not mid-stream
                 // (docs/prompt-contract.md §6).
                 let rendered = CitationRenderer.render(answer: raw, sourceMap: result.sourceMap)
@@ -163,6 +173,7 @@ final class AskViewModel: ObservableObject {
                 answer = rendered.text
                 sources = rendered.sources
             } catch let error as ProviderError {
+                guard gen == generation else { return }  // don't surface a superseded run's error
                 RollingLog.shared.log("query failed: \(error)", level: .error)
                 // The missing-model message is already a full, actionable
                 // sentence — show it as-is rather than burying it after a prefix.
@@ -172,9 +183,11 @@ final class AskViewModel: ObservableObject {
                     warning = "Query failed: \(error)"
                 }
             } catch {
+                guard gen == generation else { return }
                 RollingLog.shared.log("query failed: \(error)", level: .error)
                 warning = "Query failed: \(error)"
             }
+            guard gen == generation else { return }
             isStreaming = false
         }
     }
@@ -198,6 +211,7 @@ final class AskViewModel: ObservableObject {
 
     func endSession() {
         currentTask?.cancel()
+        generation += 1  // supersede the cancelled run so it writes nothing back
         queryService?.clearSession()
         question = ""
         answer = ""
