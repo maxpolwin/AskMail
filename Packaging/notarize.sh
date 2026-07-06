@@ -36,7 +36,13 @@ fi
 
 # Refuse anything not signed with a real Developer ID: notarization requires
 # it, and a clear local error beats an opaque server-side rejection.
+# awk's early `exit` closes the pipe before codesign finishes writing,
+# which sends codesign a SIGPIPE; with pipefail that would kill this whole
+# script (exit 141) before ever reaching the check below. Disable pipefail
+# for just this one line.
+set +o pipefail
 AUTHORITY="$(codesign -dvv "$APP" 2>&1 | awk -F'=' '/^Authority=/{print $2; exit}')"
+set -o pipefail
 case "$AUTHORITY" in
   "Developer ID Application:"*)
     echo "Signed with: $AUTHORITY"
