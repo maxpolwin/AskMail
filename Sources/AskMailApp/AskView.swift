@@ -31,6 +31,82 @@ func relevancePercents(_ sources: [(number: Int, ref: SourceRef)]) -> [Int: Int]
     }
 }
 
+/// One source: the accent-coloured, clickable, selectable line and a relevance
+/// bar. Hovering the row (or the bar) reveals the exact figure within 250 ms —
+/// faster than the system tooltip, which `.help()` can't speed up — worded
+/// plainly as "Relevance score: NN%".
+private struct SourceRow: View {
+    let number: Int
+    let ref: SourceRef
+    let percent: Int?
+    @State private var hovering = false
+    @State private var showScore = false
+
+    var body: some View {
+        HStack(spacing: 8) {
+            Text(line)
+                .font(.callout)
+                .lineLimit(1)
+            Spacer(minLength: 8)
+            if let percent {
+                RelevanceBar(fraction: Double(percent) / 100)
+            }
+        }
+        .contentShape(Rectangle())  // whole row (incl. gaps) is the hover target
+        .overlay(alignment: .trailing) {
+            if showScore, let percent {
+                Text("Relevance score: \(percent)%")
+                    .font(.caption.weight(.medium))
+                    .foregroundStyle(Theme.accent)
+                    .padding(.horizontal, 8)
+                    .padding(.vertical, 3)
+                    .background(.ultraThinMaterial, in: Capsule())
+                    .overlay(Capsule().strokeBorder(Theme.hairline, lineWidth: 0.5))
+                    .allowsHitTesting(false)
+                    .transition(.opacity)
+            }
+        }
+        .onHover { inside in
+            hovering = inside
+            if inside {
+                // Reveal after a quarter second of sustained hover.
+                Task { @MainActor in
+                    try? await Task.sleep(nanoseconds: 250_000_000)
+                    if hovering { withAnimation(.easeOut(duration: 0.1)) { showScore = true } }
+                }
+            } else {
+                withAnimation(.easeOut(duration: 0.1)) { showScore = false }
+            }
+        }
+    }
+
+    /// Accent-coloured line with a `message://` link, so it opens on click yet
+    /// still selects and copies as text.
+    private var line: AttributedString {
+        var line = AttributedString(formatSource(number, ref))
+        line.foregroundColor = Theme.accent
+        line.link = CitationRenderer.messageURL(messageID: ref.messageID)
+        return line
+    }
+}
+
+/// A thin capsule meter filled to `fraction` (0–1) of the strongest source, in
+/// the system accent. A floor keeps a weak-but-present source visible.
+private struct RelevanceBar: View {
+    let fraction: Double
+    var body: some View {
+        Capsule()
+            .fill(Theme.hairline)
+            .frame(width: 54, height: 5)
+            .overlay(alignment: .leading) {
+                Capsule()
+                    .fill(Theme.accent)
+                    .frame(width: 54 * min(1, max(0.06, fraction)), height: 5)
+            }
+            .accessibilityLabel("Relevance \(Int((fraction * 100).rounded())) percent")
+    }
+}
+
 @MainActor
 final class AskViewModel: ObservableObject {
     @Published var question = ""
@@ -196,7 +272,8 @@ struct AskView: View {
                                 .foregroundStyle(.secondary)
                             let pct = relevancePercents(model.sources)
                             ForEach(model.sources, id: \.number) { source in
-                                sourceRow(source.number, source.ref, percent: pct[source.number])
+                                SourceRow(number: source.number, ref: source.ref,
+                                          percent: pct[source.number])
                             }
                         }
                     }
@@ -233,51 +310,6 @@ struct AskView: View {
             out[index..<out.characters.index(after: index)].foregroundColor = Theme.accent
         }
         return out
-    }
-
-    /// One source: the accent-coloured, clickable, selectable line, then a
-    /// relevance bar scaled to the strongest source in this answer. The whole
-    /// row shows the exact figure on hover (the 5 pt bar alone is too small a
-    /// target); it's also carried into copied text.
-    @ViewBuilder
-    private func sourceRow(_ number: Int, _ ref: SourceRef, percent: Int?) -> some View {
-        HStack(spacing: 8) {
-            Text(sourceLine(number, ref))
-                .font(.callout)
-                .lineLimit(1)
-            Spacer(minLength: 8)
-            if let percent {
-                RelevanceBar(fraction: Double(percent) / 100)
-            }
-        }
-        .contentShape(Rectangle())  // make the whole row (incl. gaps) hoverable
-        .help(percent.map { "Relevance \($0)% \u{00B7} RRF \(String(format: "%.4f", ref.relevance ?? 0))" } ?? "")
-    }
-
-    /// The source line as an attributed string: accent-coloured with a
-    /// `message://` link so it opens on click yet still selects and copies.
-    private func sourceLine(_ number: Int, _ ref: SourceRef) -> AttributedString {
-        var line = AttributedString(formatSource(number, ref))
-        line.foregroundColor = Theme.accent
-        line.link = CitationRenderer.messageURL(messageID: ref.messageID)
-        return line
-    }
-
-    /// A thin capsule meter filled to `fraction` (0–1) of the strongest source,
-    /// in the system accent. A floor keeps a weak-but-present source visible.
-    private struct RelevanceBar: View {
-        let fraction: Double
-        var body: some View {
-            Capsule()
-                .fill(Theme.hairline)
-                .frame(width: 54, height: 5)
-                .overlay(alignment: .leading) {
-                    Capsule()
-                        .fill(Theme.accent)
-                        .frame(width: 54 * min(1, max(0.06, fraction)), height: 5)
-                }
-                .accessibilityLabel("Relevance \(Int((fraction * 100).rounded())) percent")
-        }
     }
 
     /// Transient "Copied to clipboard" pill at the trailing end of the prompt,

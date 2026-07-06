@@ -257,8 +257,14 @@ struct SettingsView: View {
 
                 Stepper("Context tokens: \(settings.contextTokenLimit)",
                         value: $settings.contextTokenLimit, in: 512...16384, step: 512)
+                Text("How much of your email is read into each answer. Higher considers more sources, but is slower and uses more memory.")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
                 Stepper("Answer tokens: \(settings.answerTokenLimit)",
                         value: $settings.answerTokenLimit, in: 100...4000, step: 100)
+                Text("The maximum length of a reply.")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
 
                 // Guidance: what good values are for this Mac + model, with a
                 // one-click apply. Only nudge when the current values differ.
