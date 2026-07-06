@@ -11,6 +11,72 @@ pulls). Phases 1–2 are pure UX; Phase 3 is the correctness-critical piece.
 
 ---
 
+## Diagnostic background — why this feature exists
+
+A real user's run surfaced the problems this spec addresses. Ground truth, read
+from AskMail's own database (`~/Library/Application Support/AskMail/askmail.db`)
+after the run:
+
+| Table | Rows | Meaning |
+|---|---:|---|
+| `chunks` | **0** | Nothing embedded — search fully non-functional |
+| `ingest_failures` | 13,200 | Every message failed and is queued for retry |
+| `ingest_state` | 662 | Empty-body files marked "done" (no chunks) |
+| `messages` | 657 | 662 minus 5 duplicate Message-IDs (same mail in two folders) |
+
+**Root cause:** the embedding model `nomic-embed-text` was not pulled, so every
+`/api/embed` returned `HTTP 404 "model not found, try pulling it first"` →
+**zero vectors, every query 404s.** This is the friction Phases 1–3 remove: an
+in-app path to install/start Ollama and pull the model, so a new user never
+touches the Terminal.
+
+**Scope finding (reconciliation).** The visible account
+`curiousmind@posteo.com` shows ~1,237 Inbox messages, but the run attempted
+**13,862** files (`662 + 13,200`). The failure rows store each file's path, so
+the breakdown is exact — all one account (`C1A3CD87…`):
+
+| Mailbox | Count | Share |
+|---|---:|---:|
+| **Trash** | **11,926** | **90%** |
+| INBOX | 1,246 | 9% |
+| Junk | 27 | <1% |
+| Sent | 1 | — |
+
+INBOX (1,246) matches the screenshot; the "extra ~12,600" was the **Trash
+folder**. `EmlxLocator.scan` walked the whole account tree with no mailbox
+filter, so it treated ~11,900 deleted emails and 27 spam messages as fair game
+to embed and later cite — a correctness problem, and ~90% wasted work.
+
+### Already fixed on `main` — DO NOT re-implement
+- **Mailbox scoping (`c54e419`).** `EmlxLocator.scan` now uses an **allowlist:
+  only Inbox and Sent are vectorized** (Trash, Junk, Archive, Drafts excluded) —
+  stricter than "skip Trash/Junk". See `isIndexed` / `topLevelMailbox` /
+  `indexedMailboxNames` in `Sources/AskMailCore/EnvelopeIndex.swift` and
+  `Tests/AskMailCoreTests/EmlxLocatorTests.swift`. Nothing to add here.
+- **Model-not-found handling (`601dd08`).** A 404 "model not found" is mapped to
+  `ProviderError.ollamaModelMissing(model:)` and surfaced as an actionable
+  "run `ollama pull …`" message in `Vectorizer`/`AskView` (a 404 is not a
+  `URLError`, so it bypassed the unreachable-abort guard). Phase 1 replaces the
+  Terminal instruction with the in-app download; do not re-add the message
+  plumbing.
+
+### Adjacent open cleanups — small, do alongside the phases
+1. **`ingest_state` = 662 "new" overstates progress.** Those are empty-body
+   messages (zero chunks) counted as ingested (see `MailboxIngestor.ingest` —
+   the embed loop is skipped when there are no chunks). Either don't count a
+   zero-chunk message as "new" or report it separately (e.g. "N new, M empty"),
+   so the Settings status doesn't imply searchable content that isn't there.
+   Add a test. *(Fits naturally with Phase 3.)*
+2. **Stale failure rows for now-excluded mailboxes.** After `c54e419`, the
+   ~11,953 Trash/Junk failure rows already in a user's DB can no longer be
+   re-scanned (scan excludes them) or cleared, so "Retry N failed…" stays
+   inflated forever. On a run, prune `ingest_failures` rows whose `path` is no
+   longer an indexed mailbox (or whose file no longer scans), making Retry
+   self-healing. "Delete & rebuild" already clears them; this handles the
+   incremental path. Add a store-level test. *(Fits with Phase 3.)*
+
+---
+
 ## 0. Background — current state (read these first)
 
 - Providers live in `Sources/AskMailCore/Providers.swift`:
