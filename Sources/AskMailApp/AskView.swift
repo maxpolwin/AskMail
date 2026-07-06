@@ -185,7 +185,14 @@ final class AskViewModel: ObservableObject {
             } catch {
                 guard gen == generation else { return }
                 RollingLog.shared.log("query failed: \(error)", level: .error)
-                warning = "Query failed: \(error)"
+                // A raw URLError (connection refused/timed out) means Ollama
+                // isn't installed or isn't running — tell the user that
+                // instead of dumping NSURLErrorDomain internals in the panel.
+                if ProviderError.isConnectionFailure(error) {
+                    warning = "Ollama isn\u{2019}t running. Open Settings to start or install it, then try again."
+                } else {
+                    warning = "Query failed: \(error)"
+                }
             }
             guard gen == generation else { return }
             isStreaming = false

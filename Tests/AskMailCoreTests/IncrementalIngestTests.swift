@@ -206,4 +206,16 @@ final class RetryTests: XCTestCase {
         XCTAssertFalse(ProviderError.isOllamaModelMissing(status: 404, body: "no such route"))
         XCTAssertFalse(ProviderError.isOllamaModelMissing(status: 500, body: "model not found"))
     }
+
+    // AskViewModel and MailboxIngestor both rely on this to tell "Ollama isn't
+    // installed/running" apart from an ordinary provider error.
+    func testConnectionFailureClassification() {
+        XCTAssertTrue(ProviderError.isConnectionFailure(URLError(.cannotConnectToHost)))
+        XCTAssertTrue(ProviderError.isConnectionFailure(URLError(.cannotFindHost)))
+        XCTAssertTrue(ProviderError.isConnectionFailure(URLError(.networkConnectionLost)))
+        XCTAssertTrue(ProviderError.isConnectionFailure(URLError(.timedOut)))
+        XCTAssertFalse(ProviderError.isConnectionFailure(ProviderError.http(status: 404, body: "not found")),
+                       "a reachable-but-4xx response is a different problem, not a connection failure")
+        XCTAssertFalse(ProviderError.isConnectionFailure(ProviderError.ollamaModelMissing(model: "x")))
+    }
 }

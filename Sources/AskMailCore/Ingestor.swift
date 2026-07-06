@@ -221,15 +221,7 @@ public final class MailboxIngestor {
     /// connection refused/lost) as opposed to a per-message problem. Matches the
     /// observed -1004 "could not connect" cascade.
     static func isConnectionError(_ error: Error) -> Bool {
-        guard let urlError = error as? URLError else { return false }
-        switch urlError.code {
-        case .cannotConnectToHost, .cannotFindHost, .dnsLookupFailed,
-             .networkConnectionLost, .notConnectedToInternet, .timedOut,
-             .resourceUnavailable:
-            return true
-        default:
-            return false
-        }
+        ProviderError.isConnectionFailure(error)
     }
 
     /// Returns the number of chunks stored, so callers can tell an ingested

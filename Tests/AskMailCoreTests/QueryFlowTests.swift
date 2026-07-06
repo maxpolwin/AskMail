@@ -85,6 +85,20 @@ final class QueryServiceTests: XCTestCase {
         XCTAssertEqual(text, Defaults.noMatchMessage)
     }
 
+    // When Ollama isn't installed/running, the embed call throws a raw
+    // URLError; AskViewModel relies on ProviderError.isConnectionFailure to
+    // turn that into "Ollama isn't running" instead of showing it verbatim.
+    func testRetrievalFailureIsClassifiableAsConnectionFailure() async throws {
+        let store = try SQLiteStore.inMemory()
+        let service = QueryService(store: store, embedder: UnreachableEmbedder(), log: { _, _ in })
+        do {
+            _ = try await service.retrieve(question: "anything", settings: QuerySettings())
+            XCTFail("expected retrieval to throw when the embedder is unreachable")
+        } catch {
+            XCTAssertTrue(ProviderError.isConnectionFailure(error))
+        }
+    }
+
     // FR-3: clearing the session must forget prior turns.
     func testClearSessionForgetsBuffer() async throws {
         let store = try SQLiteStore.inMemory()

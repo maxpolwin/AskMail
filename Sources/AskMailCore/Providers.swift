@@ -63,6 +63,24 @@ public enum ProviderError: Error, CustomStringConvertible {
     public static func isOllamaModelMissing(status: Int, body: String) -> Bool {
         status == 404 && body.contains("not found")
     }
+
+    /// Whether `error` means the Ollama daemon itself is unreachable (not
+    /// installed, not running, or the connection dropped) as opposed to an
+    /// application-level error like a missing model. `MailboxIngestor` uses
+    /// this to abort a run early instead of logging thousands of identical
+    /// failures; `AskViewModel` uses it to show "Ollama isn't running" rather
+    /// than a raw `URLError` description.
+    public static func isConnectionFailure(_ error: Error) -> Bool {
+        guard let urlError = error as? URLError else { return false }
+        switch urlError.code {
+        case .cannotConnectToHost, .cannotFindHost, .dnsLookupFailed,
+             .networkConnectionLost, .notConnectedToInternet, .timedOut,
+             .resourceUnavailable:
+            return true
+        default:
+            return false
+        }
+    }
 }
 
 // MARK: - Retry
