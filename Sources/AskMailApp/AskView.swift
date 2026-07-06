@@ -166,6 +166,7 @@ struct AskView: View {
                     .font(.system(size: 21, weight: .light))  // ephemeral, light weight
                     .foregroundStyle(.primary)                // adapts light/dark
                     .onSubmit { model.submit() }
+                    .overlay(alignment: .trailing) { copiedToast }
 
                 AnimatedHairline(active: model.isStreaming)
             }
@@ -208,7 +209,6 @@ struct AskView: View {
                 }
                 .frame(height: min(answerHeight, maxAnswerHeight))
                 .onPreferenceChange(ContentHeightKey.self) { answerHeight = $0 }
-                .overlay(alignment: .topTrailing) { copiedToast }
                 // Auto-copy the finished response; the toast confirms it.
                 .onChange(of: model.isStreaming) { _, streaming in
                     if !streaming, !model.answer.isEmpty { copyOutput() }
@@ -280,20 +280,21 @@ struct AskView: View {
         }
     }
 
-    /// Transient "Copied" pill in the top-right of the output, shown after an
-    /// auto-copy or a manual copy, then it fades on its own.
+    /// Transient "Copied to clipboard" pill at the trailing end of the prompt,
+    /// in the system accent, shown after an auto-copy or a manual copy, then it
+    /// fades on its own. Non-interactive so it never blocks the field.
     @ViewBuilder
     private var copiedToast: some View {
         if copied {
-            Text("Copied")
-                .font(.caption2.weight(.medium))
-                .foregroundStyle(.secondary)
+            Text("Copied to clipboard")
+                .font(.caption.weight(.medium))
+                .foregroundStyle(Theme.accent)
                 .padding(.horizontal, 8)
                 .padding(.vertical, 3)
                 .background(.ultraThinMaterial, in: Capsule())
                 .overlay(Capsule().strokeBorder(Theme.hairline, lineWidth: 0.5))
-                .padding(6)
-                .transition(.opacity.combined(with: .move(edge: .top)))
+                .allowsHitTesting(false)
+                .transition(.opacity.combined(with: .move(edge: .trailing)))
         }
     }
 
