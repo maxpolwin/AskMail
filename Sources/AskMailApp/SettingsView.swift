@@ -18,6 +18,7 @@ struct SettingsView: View {
     @State private var launchAtLogin = LoginItem.isEnabled
     @State private var accounts: [MailAccount] = []
     @State private var accessStatus: MailAccessStatus = .ok
+    @State private var showSystemPromptEditor = false
 
     var body: some View {
         Form {
@@ -175,11 +176,24 @@ struct SettingsView: View {
             }
 
             Section("System prompt") {
-                TextEditor(text: $settings.systemPrompt)
-                    .font(.system(size: 12, design: .monospaced))
-                    .frame(minHeight: 160)
-                Button("Reset to default") {
-                    settings.systemPrompt = Defaults.defaultSystemPrompt
+                // Collapsed by default: the editor is an advanced, rarely-used
+                // control and its 160 pt of monospaced text otherwise dominates
+                // the settings window.
+                DisclosureGroup(isExpanded: $showSystemPromptEditor) {
+                    TextEditor(text: $settings.systemPrompt)
+                        .font(.system(size: 12, design: .monospaced))
+                        .frame(minHeight: 160)
+                    Button("Reset to default") {
+                        settings.systemPrompt = Defaults.defaultSystemPrompt
+                    }
+                } label: {
+                    LabeledContent("Edit system prompt") {
+                        if settings.systemPrompt != Defaults.defaultSystemPrompt {
+                            Text("customized")
+                                .font(.caption)
+                                .foregroundStyle(.secondary)
+                        }
+                    }
                 }
             }
 
