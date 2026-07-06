@@ -9,6 +9,10 @@ public struct AssembledPrompt: Sendable {
     /// `N -> source email`, one number per distinct email (contract §3).
     /// Used for both inline superscript links and the numbered source list.
     public var sourceMap: [Int: SourceRef]
+    /// Chunks that survived the `contextTokenLimit` trim, for callers that want
+    /// to log how many of the retrieved chunks actually reached the model
+    /// (vs. dropped by `trimToBudget` for lack of space).
+    public var chunksKept: Int
 }
 
 /// Implements docs/prompt-contract.md exactly: context block format (§3),
@@ -66,7 +70,8 @@ public struct PromptAssembler: Sendable {
 
         return AssembledPrompt(system: systemPrompt,
                                user: bodyParts.joined(separator: "\n\n"),
-                               sourceMap: sourceMap)
+                               sourceMap: sourceMap,
+                               chunksKept: budgeted.count)
     }
 
     // MARK: Context block (§3)

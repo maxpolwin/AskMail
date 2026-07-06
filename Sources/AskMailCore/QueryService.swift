@@ -97,6 +97,20 @@ public final class QueryService: @unchecked Sendable {
                                         contextTokenLimit: settings.contextTokenLimit)
         let currentSession = lock.withLock { session }
         let prompt = assembler.assemble(question: question, chunks: chunks, session: currentSession)
+        // A nonzero drop means contextTokenLimit is actually shaping the
+        // answer, not just a configured ceiling — surface it at .error so it
+        // reaches the log regardless of the user's chosen verbosity, the same
+        // way the topK line does below.
+        let droppedByBudget = chunks.count - prompt.chunksKept
+        log("prompt contextTokenLimit=\(settings.contextTokenLimit) chunksIn=\(chunks.count) chunksKept=\(prompt.chunksKept) droppedByBudget=\(droppedByBudget)",
+            droppedByBudget > 0 ? .error : .debug)
+        // trimToBudget keeps a strict prefix of `chunks` (best-ranked first)
+        // and drops the tail (contract §3), so the dropped set is exactly
+        // the suffix beyond chunksKept. Detail kept at .debug: the .error
+        // line above is the alert, this is the follow-up for "which emails".
+        for chunk in chunks.suffix(droppedByBudget) {
+            log("prompt droppedByBudget chunk=\(chunk.chunkID) subject=\"\(chunk.subject)\" from=\(chunk.sender) date=\(PromptAssembler.ymd(chunk.dateUnix)) score=\(String(format: "%.4f", chunk.score))", .debug)
+        }
         log("prompt.system:\n\(prompt.system)", .debug)
         log("prompt.user:\n\(prompt.user)", .debug)
 
@@ -195,6 +209,19 @@ public final class QueryService: @unchecked Sendable {
         // settings.topK (a small user-controlled setting), so this cannot
         // become an unbounded dump the way logging every candidate would.
         let finalCandidates = Array(candidates.prefix(settings.topK))
+        // A nonzero drop means topK is actually excluding relevant emails,
+        // not just a configured ceiling — surface it at .error so it reaches
+        // the log regardless of the user's chosen verbosity.
+        let droppedByTopK = candidates.count - finalCandidates.count
+        log("retrieval topK=\(settings.topK) candidates=\(candidates.count) kept=\(finalCandidates.count) droppedByTopK=\(droppedByTopK)",
+            droppedByTopK > 0 ? .error : .debug)
+        // Contextual detail on which emails topK actually excluded, at
+        // .debug: the .error line above is the alert, this is the follow-up
+        // for "which emails" (candidates is fused-rank order, so the tail
+        // beyond topK is exactly the dropped, lowest-ranked set).
+        for chunk in candidates.suffix(droppedByTopK) {
+            log("retrieval droppedByTopK chunk=\(chunk.chunkID) subject=\"\(chunk.subject)\" from=\(chunk.sender) date=\(PromptAssembler.ymd(chunk.dateUnix)) score=\(String(format: "%.4f", chunk.score))", .debug)
+        }
         for (index, chunk) in finalCandidates.enumerated() {
             let via: String
             if directOnlyIDs.contains(chunk.chunkID) {

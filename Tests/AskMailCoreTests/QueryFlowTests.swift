@@ -157,20 +157,27 @@ final class QueryServiceTests: XCTestCase {
         let text2 = "webinar pricing"
         try store.replaceChunks(messagePk: pk2, chunks: [(.body, text2, try await embedder.embed([text2])[0])])
 
-        var logged: [String] = []
+        var logged: [(line: String, level: RollingLog.LogLevel)] = []
         let lock = NSLock()
-        let service = QueryService(store: store, embedder: embedder, log: { line, _ in
-            lock.lock(); logged.append(line); lock.unlock()
+        let service = QueryService(store: store, embedder: embedder, log: { line, level in
+            lock.lock(); logged.append((line, level)); lock.unlock()
         })
         _ = try await service.retrieve(question: "invoice payment due webinar pricing", settings: QuerySettings())
 
-        let finalLines = logged.filter { $0.hasPrefix("retrieval final[") }
+        let finalLines = logged.map(\.line).filter { $0.hasPrefix("retrieval final[") }
         XCTAssertEqual(finalLines.count, 2)
         XCTAssertTrue(finalLines[0].hasPrefix("retrieval final[1]"), finalLines[0])
         XCTAssertTrue(finalLines[0].contains("subject=\"Invoice\""), finalLines[0])
         XCTAssertTrue(finalLines[0].contains("via=semantic"), finalLines[0])
         XCTAssertTrue(finalLines[1].hasPrefix("retrieval final[2]"), finalLines[1])
         XCTAssertTrue(finalLines[1].contains("via=semantic"), finalLines[1])
+
+        // Both candidates fit under the default topK=8, so nothing was
+        // dropped: the summary line must stay at .debug, not escalate to
+        // .error.
+        let topKLine = logged.first { $0.line.hasPrefix("retrieval topK=") }
+        XCTAssertEqual(topKLine?.line, "retrieval topK=8 candidates=2 kept=2 droppedByTopK=0")
+        XCTAssertEqual(topKLine?.level, .debug)
     }
 
     func testLoggingTagsDirectDateOnlyCandidates() async throws {
@@ -224,5 +231,85 @@ final class QueryServiceTests: XCTestCase {
         XCTAssertTrue(chunks.isEmpty)
         XCTAssertTrue(logged.contains { $0.hasPrefix("retrieval droppedByFloor=1 ") }, logged.joined(separator: "\n"))
         XCTAssertFalse(logged.contains { $0.hasPrefix("retrieval final[") })
+    }
+
+    // The finalTopK cap isn't user-facing, so it must be spottable in the log:
+    // when there are more above-floor candidates than topK allows, the drop
+    // count should show up explicitly rather than being inferred from
+    // counting `retrieval final[...]` lines.
+    func testLoggingReportsTopKLimitAndDrops() async throws {
+        let store = try SQLiteStore.inMemory()
+        let embedder = StubEmbedder()
+        for i in 0..<5 {
+            let pk = try store.upsertMessage(messageID: "m\(i)@x", account: "acc",
+                                             subject: "Invoice \(i)", sender: "billing@x",
+                                             dateUnix: Int64(i))
+            let text = "invoice payment due webinar pricing"
+            try store.replaceChunks(messagePk: pk, chunks: [(.body, text, try await embedder.embed([text])[0])])
+        }
+
+        var logged: [(line: String, level: RollingLog.LogLevel)] = []
+        let lock = NSLock()
+        let service = QueryService(store: store, embedder: embedder, log: { line, level in
+            lock.lock(); logged.append((line, level)); lock.unlock()
+        })
+        var settings = QuerySettings()
+        settings.topK = 3
+        let chunks = try await service.retrieve(question: "invoice payment due webinar pricing", settings: settings)
+
+        XCTAssertEqual(chunks.count, 3)
+        let dump = logged.map { "[\($0.level.tag)] \($0.line)" }.joined(separator: "\n")
+
+        // The summary escalates to .error precisely because something was
+        // dropped — this is the part that must be visible without switching
+        // log verbosity to Debug.
+        let summary = logged.first { $0.line.hasPrefix("retrieval topK=") }
+        XCTAssertEqual(summary?.line, "retrieval topK=3 candidates=5 kept=3 droppedByTopK=2", dump)
+        XCTAssertEqual(summary?.level, .error, dump)
+
+        // The two excluded emails' identities are the contextual follow-up
+        // for analysis, kept at .debug since they're detail, not the alert.
+        let dropLines = logged.filter { $0.line.hasPrefix("retrieval droppedByTopK ") }
+        XCTAssertEqual(dropLines.count, 2, dump)
+        XCTAssertTrue(dropLines.allSatisfy { $0.level == .debug }, dump)
+        XCTAssertTrue(dropLines.allSatisfy { $0.line.contains("subject=\"Invoice") }, dump)
+    }
+
+    // The contextTokenLimit trim happens inside PromptAssembler, after
+    // retrieval logging. Log it too, so a too-small budget is as visible as
+    // a too-small topK, instead of only inferable by diffing chunk counts
+    // between the retrieval log and the dumped prompt.user text.
+    func testLoggingReportsContextTokenBudgetAndDrops() async throws {
+        let store = try SQLiteStore.inMemory()
+        let embedder = StubEmbedder()
+        let bodies = ["alpha content ", "beta content ", "gamma content "]
+        for (i, phrase) in bodies.enumerated() {
+            let pk = try store.upsertMessage(messageID: "m\(i)@x", account: "acc",
+                                             subject: "S\(i)", sender: "s\(i)@x", dateUnix: Int64(i))
+            let body = String(repeating: phrase, count: 20)
+            try store.replaceChunks(messagePk: pk, chunks: [(.body, body, try await embedder.embed([body])[0])])
+        }
+
+        var logged: [(line: String, level: RollingLog.LogLevel)] = []
+        let lock = NSLock()
+        let service = QueryService(store: store, embedder: embedder, log: { line, level in
+            lock.lock(); logged.append((line, level)); lock.unlock()
+        })
+        var settings = QuerySettings()
+        settings.contextTokenLimit = 60  // smaller than even one ~20-repetition chunk
+        _ = try await service.ask("alpha content", settings: settings)
+        let dump = logged.map { "[\($0.level.tag)] \($0.line)" }.joined(separator: "\n")
+
+        // The summary escalates to .error precisely because the budget
+        // actually cut chunks — visible without switching to Debug verbosity.
+        let summary = logged.first { $0.line.hasPrefix("prompt contextTokenLimit=") }
+        XCTAssertEqual(summary?.line, "prompt contextTokenLimit=60 chunksIn=3 chunksKept=1 droppedByBudget=2", dump)
+        XCTAssertEqual(summary?.level, .error, dump)
+
+        // The two trimmed emails' identities are the contextual follow-up
+        // for analysis, kept at .debug since they're detail, not the alert.
+        let dropLines = logged.filter { $0.line.hasPrefix("prompt droppedByBudget ") }
+        XCTAssertEqual(dropLines.count, 2, dump)
+        XCTAssertTrue(dropLines.allSatisfy { $0.level == .debug }, dump)
     }
 }
