@@ -36,7 +36,12 @@ fi
 # Refuse anything not signed with a real Developer ID — same check notarize.sh
 # uses, so a mis-signed .app fails fast here instead of via a confusing DMG
 # Gatekeeper rejection later.
+# awk's early `exit` closes the pipe before codesign finishes writing, which
+# sends codesign a SIGPIPE; with pipefail that kills this whole script (exit
+# 141) before ever reaching the check below. Disable pipefail for this line.
+set +o pipefail
 AUTHORITY="$(codesign -dvv "$APP" 2>&1 | awk -F'=' '/^Authority=/{print $2; exit}')"
+set -o pipefail
 case "$AUTHORITY" in
   "Developer ID Application:"*) ;;
   *)
