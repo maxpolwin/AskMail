@@ -20,9 +20,63 @@ struct SettingsView: View {
     @State private var accounts: [MailAccount] = []
     @State private var accessStatus: MailAccessStatus = .ok
     @State private var showSystemPromptEditor = false
+    @State private var showEmbeddingSwapConfirmation = false
+    /// The in-flight embedding-model change awaiting rebuild consent; `from`
+    /// restores the picker on cancel.
+    @State private var embeddingSwap: (from: String, to: String, messages: Int)?
+    /// Suppresses the swap prompt while the picker is being programmatically
+    /// reverted after a cancel.
+    @State private var revertingEmbeddingModel = false
+
+    /// Setup steps derived from the same detections the sections use; the
+    /// card vanishes once everything is green.
+    private var checklist: OnboardingChecklist {
+        OnboardingChecklist.derive(
+            fullDiskAccess: accessStatus != .permissionDenied,
+            accountPicked: !settings.accountID.isEmpty,
+            ollamaStatus: engine.status,
+            hasVectorized: settings.lastVectorized != nil)
+    }
 
     var body: some View {
         Form {
+            if !checklist.allDone {
+                Section("Getting started") {
+                    checklistRow(checklist.fullDiskAccess, "Grant Full Disk Access") {
+                        Button("Open settings\u{2026}") { openFullDiskAccessSettings() }
+                    }
+                    checklistRow(checklist.accountPicked, "Pick a Mail account") {
+                        Text("Choose under Mailbox")
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                    }
+                    checklistRow(checklist.ollamaRunning, "Ollama running") {
+                        switch engine.status {
+                        case .notInstalled:
+                            Button("Download Ollama\u{2026}") { engine.openDownloadPage() }
+                        case .stopped:
+                            Button("Start") { Task { await engine.startOllama() } }
+                        default:
+                            EmptyView()
+                        }
+                    }
+                    checklistRow(checklist.embeddingModelInstalled, "Embedding model installed") {
+                        if checklist.ollamaRunning {
+                            Button("Download") {
+                                Task { await engine.pull(model: settings.embeddingModel) }
+                            }
+                            .disabled(engine.pullingModel != nil)
+                        }
+                    }
+                    checklistRow(checklist.firstVectorizationDone, "First vectorization") {
+                        if checklist.embeddingModelInstalled && checklist.accountPicked {
+                            Button("Vectorize now") { Task { await vectorizer.run(.manual) } }
+                                .disabled(vectorizer.progress != nil)
+                        }
+                    }
+                }
+            }
+
             Section("Mailbox") {
                 if accounts.isEmpty {
                     Text(mailboxEmptyMessage)
@@ -182,7 +236,7 @@ struct SettingsView: View {
 
                 modelPicker(title: "Embedding model", kind: .embedding,
                             selection: $settings.embeddingModel)
-                Text("Used to index and search your email. Changing it requires re-indexing (Delete & rebuild).")
+                Text("Used to index and search your email. Switching asks to re-index \u{2014} vectors from different models can\u{2019}t be mixed.")
                     .font(.caption)
                     .foregroundStyle(.secondary)
 
@@ -252,6 +306,18 @@ struct SettingsView: View {
         }
         .onChange(of: settings.provider) { _, provider in
             Task { await remote.refresh(for: provider) }
+        }
+        .onChange(of: settings.embeddingModel) { old, new in
+            handleEmbeddingModelChange(from: old, to: new)
+        }
+        .confirmationDialog(
+            "Switching the embedding model re-indexes your mail",
+            isPresented: $showEmbeddingSwapConfirmation) {
+            Button("Delete index & re-embed \(embeddingSwap?.messages ?? 0) messages",
+                   role: .destructive) { confirmEmbeddingSwap() }
+            Button("Cancel", role: .cancel) { cancelEmbeddingSwap() }
+        } message: {
+            Text("Vectors from different models can\u{2019}t be mixed. Switching to \u{2018}\(embeddingSwap?.to ?? "")\u{2019} deletes the current index and re-embeds everything, which can take a while. Cancel keeps \u{2018}\(embeddingSwap?.from ?? "")\u{2019}.")
         }
         .alert("Export debug logs?", isPresented: $showExportLogsWarning) {
             Button("Export\u{2026}", role: .destructive) { exportLogs() }
@@ -480,6 +546,51 @@ struct SettingsView: View {
         formatter.dateFormat = "yyyy-MM-dd-HHmmss"
         return formatter
     }()
+
+    /// One "Getting started" row: state icon + title, with the fix control
+    /// shown only while the step is open. The icon shape (not just color)
+    /// distinguishes done from open.
+    private func checklistRow(_ done: Bool, _ title: String,
+                              @ViewBuilder fix: () -> some View) -> some View {
+        HStack {
+            Image(systemName: done ? "checkmark.circle.fill" : "circle")
+                .foregroundStyle(done ? Color.green : Color.secondary)
+            Text(title)
+            Spacer()
+            if !done { fix() }
+        }
+    }
+
+    /// Gate on an embedding-model change (Phase 3): with indexed content, ask
+    /// before the required rebuild; on an empty index the change is free.
+    /// Flipping back to the model that built the index needs no prompt.
+    private func handleEmbeddingModelChange(from old: String, to new: String) {
+        if revertingEmbeddingModel {
+            revertingEmbeddingModel = false
+            return
+        }
+        guard let store = try? SQLiteStore(path: SettingsStore.databasePath),
+              let messages = try? store.messageCount(), messages > 0 else { return }
+        if let stamp = try? store.embeddingStamp(),
+           OllamaStatus.modelName(stamp.model, matches: new) {
+            return  // returning to the indexed model; nothing to rebuild
+        }
+        embeddingSwap = (from: old, to: new, messages: messages)
+        showEmbeddingSwapConfirmation = true
+    }
+
+    private func confirmEmbeddingSwap() {
+        embeddingSwap = nil
+        deleteAndRebuild()
+        Task { await vectorizer.run(.manual) }
+    }
+
+    private func cancelEmbeddingSwap() {
+        guard let swap = embeddingSwap else { return }
+        embeddingSwap = nil
+        revertingEmbeddingModel = true
+        settings.embeddingModel = swap.from
+    }
 
     private func deleteAndRebuild() {
         do {

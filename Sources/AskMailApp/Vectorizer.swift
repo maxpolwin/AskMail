@@ -78,11 +78,20 @@ final class Vectorizer: ObservableObject {
         let storageKey = settings.accountStorageKey
         do {
             let store = try SQLiteStore(path: SettingsStore.databasePath)
+            let model = settings.embeddingModel
             let ingestor = MailboxIngestor(store: store,
-                                           embedder: OllamaEmbedder(model: settings.embeddingModel),
-                                           account: storageKey)
+                                           embedder: OllamaEmbedder(model: model),
+                                           account: storageKey,
+                                           embeddingStamp: await Self.embeddingStamp(for: model))
             let files = EmlxLocator.scan(accountDirectory: directory)
                 .sorted { $0.sourceID < $1.sourceID }
+            // Failure rows whose file no longer scans (excluded mailbox,
+            // deleted message) can never be retried; drop them so the
+            // "Retry N failed…" count is honest.
+            if let pruned = try? store.pruneIngestFailures(keeping: Set(files.map(\.sourceID))),
+               pruned > 0 {
+                RollingLog.shared.log("pruned \(pruned) stale ingest failures (no longer scannable)", level: .info)
+            }
             let summary = try await ingestor.ingestNew(files) { update in
                 Task { @MainActor in
                     let v = Vectorizer.shared
@@ -90,9 +99,9 @@ final class Vectorizer: ObservableObject {
                 }
             }
             settings.lastVectorized = Date()
-            status = "Done: \(summary.ingested) new, \(summary.skipped) unchanged, \(summary.failed) failed."
+            status = "Done: \(summary.ingested) new, \(summary.empty) empty, \(summary.skipped) unchanged, \(summary.failed) failed."
             RollingLog.shared.log(
-                "\(trigger.rawValue) vectorize done: \(summary.ingested) new, "
+                "\(trigger.rawValue) vectorize done: \(summary.ingested) new, \(summary.empty) empty, "
                 + "\(summary.skipped) unchanged, \(summary.failed) failed", level: .info)
             return summary
         } catch let error as IngestError {
@@ -105,6 +114,9 @@ final class Vectorizer: ObservableObject {
             case .embeddingModelMissing(let model):
                 RollingLog.shared.log("\(trigger.rawValue) vectorize stopped: embedding model \(model) not installed", level: .error)
                 status = "Stopped: the embedding model \u{2018}\(model)\u{2019} isn\u{2019}t installed. Download it above in Local engine, then Vectorize now \u{2014} it resumes where it left off."
+            case .embeddingModelMismatch(let configured, let indexed):
+                RollingLog.shared.log("\(trigger.rawValue) vectorize refused: index stamped \(indexed), configured \(configured)", level: .error)
+                status = "Stopped: this index was built with \u{2018}\(indexed)\u{2019} but \u{2018}\(configured)\u{2019} is selected. Use Delete & rebuild to re-index, or switch the embedding model back."
             }
             return nil
         } catch {
@@ -145,9 +157,11 @@ final class Vectorizer: ObservableObject {
                 status = "No failed emails to retry."
                 return nil
             }
+            let model = settings.embeddingModel
             let ingestor = MailboxIngestor(store: store,
-                                           embedder: OllamaEmbedder(model: settings.embeddingModel),
-                                           account: storageKey)
+                                           embedder: OllamaEmbedder(model: model),
+                                           account: storageKey,
+                                           embeddingStamp: await Self.embeddingStamp(for: model))
             let files = EmlxLocator.scan(accountDirectory: directory)
                 .filter { failedIDs.contains($0.sourceID) }
                 .sorted { $0.sourceID < $1.sourceID }
@@ -158,7 +172,7 @@ final class Vectorizer: ObservableObject {
                 }
             }
             settings.lastVectorized = Date()
-            status = "Retried \(files.count): \(summary.ingested) now ok, \(summary.failed) still failing."
+            status = "Retried \(files.count): \(summary.ingested + summary.empty) now ok, \(summary.failed) still failing."
             RollingLog.shared.log(
                 "retry vectorize done: \(summary.ingested) now ok, \(summary.failed) still failing", level: .info)
             return summary
@@ -170,6 +184,9 @@ final class Vectorizer: ObservableObject {
             case .embeddingModelMissing(let model):
                 RollingLog.shared.log("retry vectorize stopped: embedding model \(model) not installed", level: .error)
                 status = "Stopped: the embedding model \u{2018}\(model)\u{2019} isn\u{2019}t installed. Download it above in Local engine, then retry \u{2014} it resumes where it left off."
+            case .embeddingModelMismatch(let configured, let indexed):
+                RollingLog.shared.log("retry vectorize refused: index stamped \(indexed), configured \(configured)", level: .error)
+                status = "Stopped: this index was built with \u{2018}\(indexed)\u{2019} but \u{2018}\(configured)\u{2019} is selected. Use Delete & rebuild to re-index, or switch the embedding model back."
             }
             return nil
         } catch {
@@ -177,6 +194,20 @@ final class Vectorizer: ObservableObject {
             status = "Retry failed: \(error)"
             return nil
         }
+    }
+
+    /// The stamp for a run: the configured model plus its authoritative
+    /// dimension from `/api/show`, falling back to the registry when the
+    /// daemon can't answer (the stamp still guards by model name alone).
+    static func embeddingStamp(for model: String) async -> EmbeddingStamp {
+        if let info = try? await OllamaControl().showModel(model),
+           let dimension = info.embeddingLength {
+            return EmbeddingStamp(model: model, dimensions: dimension)
+        }
+        let fallback = ModelCatalog.embedding
+            .first { OllamaStatus.modelName($0.id, matches: model) }?
+            .embeddingDimensions
+        return EmbeddingStamp(model: model, dimensions: fallback)
     }
 }
 

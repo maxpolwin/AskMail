@@ -1,0 +1,15 @@
+205
+From: No Reply <noreply@acme.example>
+To: Max <max@example.com>
+Subject: Read receipt
+Date: Tue, 03 Mar 2026 10:00:00 +0100
+Message-ID: <fixture-0004@acme.example>
+Content-Type: text/plain; charset=utf-8
+
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+	<key>flags</key><integer>8623</integer>
+</dict>
+</plist>

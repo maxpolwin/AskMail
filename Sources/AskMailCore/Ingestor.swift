@@ -8,6 +8,10 @@ public enum IngestError: Error, CustomStringConvertible {
     /// identically, so the run aborts immediately with the exact pull command
     /// rather than logging thousands of identical 404s.
     case embeddingModelMissing(model: String)
+    /// The configured embedding model differs from the one that built the
+    /// (non-empty) index. An incremental run would mix incomparable vectors,
+    /// so it is refused; only a full rebuild may proceed.
+    case embeddingModelMismatch(configured: String, indexed: String)
 
     public var description: String {
         switch self {
@@ -15,6 +19,8 @@ public enum IngestError: Error, CustomStringConvertible {
             return "embedding backend unreachable (is Ollama running at localhost:11434?)"
         case .embeddingModelMissing(let model):
             return "embedding model \u{201C}\(model)\u{201D} not installed (run: ollama pull \(model))"
+        case .embeddingModelMismatch(let configured, let indexed):
+            return "index built with \u{201C}\(indexed)\u{201D} but \u{201C}\(configured)\u{201D} is configured \u{2014} rebuild required"
         }
     }
 }
@@ -34,12 +40,18 @@ public struct IngestSummary: Sendable {
     public var failed: Int
     /// Files unchanged since a prior run, skipped without re-embedding (FR-5).
     public var skipped: Int
+    /// Messages processed but yielding zero chunks (empty body, no extractable
+    /// attachments). Reported apart from `ingested` so the status never implies
+    /// searchable content that isn't there.
+    public var empty: Int
     public var newWatermark: Int64?
 
-    public init(ingested: Int, failed: Int, skipped: Int = 0, newWatermark: Int64?) {
+    public init(ingested: Int, failed: Int, skipped: Int = 0, empty: Int = 0,
+                newWatermark: Int64?) {
         self.ingested = ingested
         self.failed = failed
         self.skipped = skipped
+        self.empty = empty
         self.newWatermark = newWatermark
     }
 }
@@ -51,17 +63,23 @@ public final class MailboxIngestor {
     private let embedder: EmbeddingProvider
     private let chunker: Chunker
     private let account: String
+    /// Model (+dimension) the caller configured this run's embedder with;
+    /// stamped into the store and checked against the previous run's stamp so
+    /// vectors from two models never mix. nil skips the stamp (legacy path).
+    private let embeddingStamp: EmbeddingStamp?
     private let log: (String, RollingLog.LogLevel) -> Void
 
     public init(store: SQLiteStore,
                 embedder: EmbeddingProvider,
                 account: String,
                 chunker: Chunker = Chunker(),
+                embeddingStamp: EmbeddingStamp? = nil,
                 log: @escaping (String, RollingLog.LogLevel) -> Void = { RollingLog.shared.log($0, level: $1) }) {
         self.store = store
         self.embedder = embedder
         self.account = account
         self.chunker = chunker
+        self.embeddingStamp = embeddingStamp
         self.log = log
     }
 
@@ -114,9 +132,26 @@ public final class MailboxIngestor {
     @discardableResult
     public func ingestNew(_ files: [EmlxFile],
                           progress: (@Sendable (IngestProgress) -> Void)? = nil) async throws -> IngestSummary {
+        // Refuse to mix models before touching anything: an incremental run
+        // over an index built by a different embedding model would interleave
+        // incomparable vectors (Phase 3 invariant). A matching or fresh index
+        // is (re-)stamped so the check holds for the next run too.
+        if let embeddingStamp {
+            let existing = try store.embeddingStamp()
+            if EmbeddingStamp.requiresRebuild(configuredModel: embeddingStamp.model,
+                                              stamp: existing,
+                                              chunkCount: try store.chunkCount()) {
+                log("ingest refused: index stamped \(existing!.encoded), configured \(embeddingStamp.encoded)", .error)
+                throw IngestError.embeddingModelMismatch(configured: embeddingStamp.model,
+                                                         indexed: existing!.model)
+            }
+            try store.setEmbeddingStamp(embeddingStamp)
+        }
+
         var ingested = 0
         var failed = 0
         var skipped = 0
+        var empty = 0
         var consecutiveUnreachable = 0
         var maxDate: Int64 = (try? store.watermark()) ?? 0
 
@@ -129,10 +164,13 @@ public final class MailboxIngestor {
             }
             do {
                 let email = try EmlxParser.parse(fileURL: file.url)
-                try await ingest(email: email)
+                let chunkCount = try await ingest(email: email)
                 try store.recordIngested(sourceID: file.sourceID, fingerprint: file.fingerprint)
                 try? store.clearIngestFailure(sourceID: file.sourceID)
-                ingested += 1
+                // A zero-chunk message (empty body, nothing extractable) is
+                // done — but it added no searchable content, so it doesn't
+                // count as "new" (adjacent cleanup #1).
+                if chunkCount == 0 { empty += 1 } else { ingested += 1 }
                 consecutiveUnreachable = 0
                 maxDate = max(maxDate, email.dateUnix)
             } catch {
@@ -166,8 +204,9 @@ public final class MailboxIngestor {
             try store.setWatermark(maxDate)
             newWatermark = maxDate
         }
-        log("ingest done (incremental): \(ingested) new, \(skipped) unchanged, \(failed) failed", .info)
-        return IngestSummary(ingested: ingested, failed: failed, skipped: skipped, newWatermark: newWatermark)
+        log("ingest done (incremental): \(ingested) new, \(empty) empty, \(skipped) unchanged, \(failed) failed", .info)
+        return IngestSummary(ingested: ingested, failed: failed, skipped: skipped,
+                             empty: empty, newWatermark: newWatermark)
     }
 
     /// The model name if this error is Ollama's "model not installed" 404 — a
@@ -193,7 +232,10 @@ public final class MailboxIngestor {
         }
     }
 
-    public func ingest(email: ParsedEmail) async throws {
+    /// Returns the number of chunks stored, so callers can tell an ingested
+    /// message from an empty one (zero chunks = nothing searchable).
+    @discardableResult
+    public func ingest(email: ParsedEmail) async throws -> Int {
         var pieces: [(source: ChunkSource, text: String)] = []
         for text in chunker.chunk(email.bodyText) {
             pieces.append((.body, text))
@@ -232,5 +274,6 @@ public final class MailboxIngestor {
              embedding: index < embeddings.count ? embeddings[index] : nil)
         }
         try store.replaceChunks(messagePk: pk, chunks: rows)
+        return rows.count
     }
 }

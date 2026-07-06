@@ -200,6 +200,7 @@ public final class SQLiteStore {
     public func vectorSearch(_ embedding: [Float], topN: Int = Defaults.vectorTopN) throws -> [Int64] {
         lock.lock(); defer { lock.unlock() }
         var scored: [(id: Int64, score: Double)] = []
+        var mismatched = 0
         try query("SELECT id, embedding FROM chunks WHERE embedding IS NOT NULL") { _ in
         } row: { statement in
             let id = sqlite3_column_int64(statement, 0)
@@ -207,8 +208,19 @@ public final class SQLiteStore {
             guard byteCount > 0, let pointer = sqlite3_column_blob(statement, 1) else { return }
             let data = Data(bytes: pointer, count: byteCount)
             let stored = Self.floats(from: data)
-            guard stored.count == embedding.count else { return }
+            guard stored.count == embedding.count else {
+                mismatched += 1
+                return
+            }
             scored.append((id, Self.cosine(embedding, stored)))
+        }
+        if mismatched > 0 {
+            // With the single-model stamp enforced at ingest, this guard is an
+            // invariant: tripping it means a bug or a pre-stamp index, and
+            // staying silent would just look like bad retrieval.
+            RollingLog.shared.log(
+                "vectorSearch DROPPED \(mismatched) chunks with mismatched dimensions \u{2014} index needs a rebuild",
+                level: .error)
         }
         return scored.sorted { $0.score > $1.score }.prefix(topN).map(\.id)
     }
@@ -343,6 +355,27 @@ public final class SQLiteStore {
 
     public func failedIngestCount() throws -> Int {
         try count("SELECT COUNT(*) FROM ingest_failures")
+    }
+
+    /// Drops failure rows whose source no longer appears in the current scan —
+    /// files in since-excluded mailboxes (Trash/Junk after the allowlist) or
+    /// deleted from disk. Without this, "Retry N failed…" stays inflated
+    /// forever with rows a retry can never reach. Returns the pruned count.
+    @discardableResult
+    public func pruneIngestFailures(keeping validSourceIDs: Set<Int64>) throws -> Int {
+        let stale = try failedIngestSourceIDs().filter { !validSourceIDs.contains($0) }
+        guard !stale.isEmpty else { return 0 }
+        lock.lock(); defer { lock.unlock() }
+        // Chunked so the placeholder count stays under SQLite's variable limit.
+        for batch in stride(from: 0, to: stale.count, by: 500).map({ Array(stale[$0..<min($0 + 500, stale.count)]) }) {
+            let placeholders = Array(repeating: "?", count: batch.count).joined(separator: ",")
+            try run("DELETE FROM ingest_failures WHERE source_id IN (\(placeholders))") { statement in
+                for (index, id) in batch.enumerated() {
+                    sqlite3_bind_int64(statement, Int32(index + 1), id)
+                }
+            }
+        }
+        return stale.count
     }
 
     // MARK: Maintenance (FR-8 delete & rebuild)
