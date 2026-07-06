@@ -356,59 +356,276 @@ extension MistralClient {
 /// Events surfaced to the panel while an answer streams.
 public enum ChatEvent: Sendable, Equatable {
     case token(String)
-    /// The primary (cloud) provider failed; answer restarts from the named
-    /// fallback provider. The UI shows a non-blocking warning and clears any
-    /// partial text. The full error body is already in the rolling log.
+    /// The answer is (or restarts) from the named fallback provider instead
+    /// of the configured primary — either the primary failed outright, or it
+    /// lost the raceTimeout race to local. The UI shows a non-blocking
+    /// warning and clears any partial text. The full reason is already in
+    /// the rolling log.
     case fallback(provider: String, error: String)
     case done
 }
 
+/// Pulls tokens from a `ChatProvider`'s stream one at a time through a
+/// reference type, so a pull started inside a `Task` closure (for racing)
+/// can be continued afterward from the router's main flow without Swift's
+/// "capture of var in concurrently executing code" complaint that a
+/// captured local `var` iterator would trigger.
+private final class TokenPump: @unchecked Sendable {
+    private var iterator: AsyncThrowingStream<String, Error>.AsyncIterator
+    init(_ stream: AsyncThrowingStream<String, Error>) {
+        iterator = stream.makeAsyncIterator()
+    }
+    /// The router never overlaps calls to this on the same pump — it always
+    /// awaits one pull's result before issuing the next — which is what
+    /// makes the `@unchecked Sendable` above safe.
+    func next() async throws -> String? {
+        try await iterator.next()
+    }
+}
+
+/// Resolves a race between two tasks to whichever finishes first, without
+/// touching the loser — it may still be legitimately useful afterward (e.g.
+/// the primary, still in flight after losing the raceTimeout race).
+private actor RaceGate {
+    private var claimed = false
+    func claim() -> Bool {
+        guard !claimed else { return false }
+        claimed = true
+        return true
+    }
+}
+
+/// Tracks in-flight racer tasks so the outer stream's teardown (the query is
+/// cancelled or resubmitted while a race is active) can force-cancel
+/// whichever are still running. A plain `Task { }` is not a structured child
+/// of the task that created it, so it is NOT cancelled automatically just
+/// because that task was — without this, a cancelled query would leave a
+/// race's loser (or even both sides, if torn down before either answers)
+/// running to completion in the background instead of actually stopping.
+private final class CancelBag: @unchecked Sendable {
+    private let lock = NSLock()
+    private var cancellers: [() -> Void] = []
+    private var alreadyCancelled = false
+
+    func track(_ cancel: @escaping () -> Void) {
+        lock.lock()
+        guard !alreadyCancelled else { lock.unlock(); cancel(); return }
+        cancellers.append(cancel)
+        lock.unlock()
+    }
+
+    func cancelAll() {
+        lock.lock()
+        alreadyCancelled = true
+        let pending = cancellers
+        cancellers.removeAll()
+        lock.unlock()
+        pending.forEach { $0() }
+    }
+}
+
+/// True if `primary` finishes first, false if `other` does. Task scheduling
+/// order for two things that complete at essentially the same instant is
+/// not deterministic, so `other` waits out a brief grace window before
+/// claiming victory — long enough for `primary` to register a genuine tie
+/// (or a scheduling-noise near-tie) first. "If in doubt, use the API
+/// response": ties, and anything within the grace window, resolve to
+/// `primary`. A real, non-tied win for `other` only pays this fixed ~1ms
+/// once, not a wait for `primary` itself to finish.
+private func firstToComplete<A: Sendable, B: Sendable>(
+    primary a: Task<A, Error>, other b: Task<B, Error>
+) async -> Bool {
+    let gate = RaceGate()
+    return await withCheckedContinuation { continuation in
+        Task {
+            _ = try? await a.value
+            if await gate.claim() { continuation.resume(returning: true) }
+        }
+        Task {
+            _ = try? await b.value
+            try? await Task.sleep(for: .milliseconds(1))
+            if await gate.claim() { continuation.resume(returning: false) }
+        }
+    }
+}
+
 /// Routes to the selected provider and falls back to local Ollama on any
-/// cloud failure, whether before the first token or mid-stream.
+/// cloud failure, whether before the first token or mid-stream. If the
+/// primary is still silent after `raceTimeout`, local is started alongside
+/// it (not instead of it) and whichever answers first wins; the other is
+/// cancelled outright rather than left running to waste resources on an
+/// answer nobody will see.
 public struct ProviderRouter: Sendable {
     public var primary: ChatProvider
     public var fallback: ChatProvider?
+    public var raceTimeout: Duration
     public var log: @Sendable (String, RollingLog.LogLevel) -> Void
 
     public init(primary: ChatProvider, fallback: ChatProvider?,
+                raceTimeout: Duration = Defaults.providerRaceTimeout,
                 log: @escaping @Sendable (String, RollingLog.LogLevel) -> Void = { RollingLog.shared.log($0, level: $1) }) {
         self.primary = primary
         self.fallback = fallback
+        self.raceTimeout = raceTimeout
         self.log = log
     }
 
     public func stream(_ request: ChatRequest) -> AsyncThrowingStream<ChatEvent, Error> {
         AsyncThrowingStream { continuation in
-            let task = Task {
-                do {
-                    do {
-                        log("provider=\(primary.name) start maxTokens=\(request.maxTokens) temperature=\(request.temperature) contextWindow=\(request.contextWindow)", .debug)
-                        for try await token in primary.stream(request) {
-                            continuation.yield(.token(token))
-                        }
-                        log("provider=\(primary.name) done", .debug)
-                        continuation.yield(.done)
-                        continuation.finish()
-                        return
-                    } catch {
-                        guard let fallback, fallback.name != primary.name else { throw error }
-                        // Full error body goes to the log; the UI gets a short warning.
-                        log("provider=\(primary.name) FAILED, falling back to \(fallback.name). error=\(error)", .error)
-                        continuation.yield(.fallback(provider: fallback.name,
-                                                     error: String(describing: error)))
-                        for try await token in fallback.stream(request) {
-                            continuation.yield(.token(token))
-                        }
-                        log("provider=\(fallback.name) done (fallback)", .info)
-                        continuation.yield(.done)
-                        continuation.finish()
-                    }
-                } catch {
-                    log("provider stream failed terminally: \(error)", .error)
-                    continuation.finish(throwing: error)
+            let cancelBag = CancelBag()
+            let task = Task { await run(request, continuation: continuation, cancelBag: cancelBag) }
+            continuation.onTermination = { _ in
+                task.cancel()
+                cancelBag.cancelAll()
+            }
+        }
+    }
+
+    private enum Outcome {
+        case token(String)
+        case empty
+        case failed(Error)
+    }
+
+    private func classify(_ task: Task<String?, Error>) async -> Outcome {
+        do {
+            if let token = try await task.value { return .token(token) }
+            return .empty
+        } catch {
+            return .failed(error)
+        }
+    }
+
+    private func run(_ request: ChatRequest,
+                     continuation: AsyncThrowingStream<ChatEvent, Error>.Continuation,
+                     cancelBag: CancelBag) async {
+        log("provider=\(primary.name) start maxTokens=\(request.maxTokens) temperature=\(request.temperature) contextWindow=\(request.contextWindow)", .debug)
+
+        guard let fallback, fallback.name != primary.name else {
+            let pump = TokenPump(primary.stream(request))
+            await drainRemaining(pump, provider: primary, request: request,
+                                isFallback: false, continuation: continuation)
+            return
+        }
+
+        let primaryPump = TokenPump(primary.stream(request))
+        let primaryTask = Task<String?, Error> { try await primaryPump.next() }
+        cancelBag.track { primaryTask.cancel() }
+        let sleeper = Task<Void, Error> { try await Task.sleep(for: raceTimeout) }
+        cancelBag.track { sleeper.cancel() }
+
+        guard await firstToComplete(primary: primaryTask, other: sleeper) else {
+            // raceTimeout elapsed with primary still silent: start local
+            // alongside it (primary keeps running) and use whichever answers
+            // first, discarding the other.
+            log("provider=\(primary.name) exceeded \(raceTimeout) response window; racing \(fallback.name) alongside it", .error)
+            let localPump = TokenPump(fallback.stream(request))
+            let localTask = Task<String?, Error> { try await localPump.next() }
+            cancelBag.track { localTask.cancel() }
+
+            if await firstToComplete(primary: primaryTask, other: localTask) {
+                await settlePrimary(await classify(primaryTask), pump: primaryPump, request: request,
+                                    fallback: fallback, continuation: continuation,
+                                    racingLocal: (localTask, localPump))
+            } else {
+                switch await classify(localTask) {
+                case .token(let token):
+                    primaryTask.cancel()
+                    log("provider=\(fallback.name) answered before \(primary.name); using it, discarding \(primary.name)", .error)
+                    continuation.yield(.fallback(provider: fallback.name,
+                                                 error: "no response from \(primary.name) within \(raceTimeout)"))
+                    continuation.yield(.token(token))
+                    await drainRemaining(localPump, provider: fallback, request: request,
+                                        isFallback: true, continuation: continuation)
+                case .empty, .failed:
+                    // Local came up empty-handed while primary was still
+                    // pending; primary is the only path left, so wait it out.
+                    await settlePrimary(await classify(primaryTask), pump: primaryPump, request: request,
+                                       fallback: fallback, continuation: continuation, racingLocal: nil)
                 }
             }
-            continuation.onTermination = { _ in task.cancel() }
+            return
+        }
+
+        await settlePrimary(await classify(primaryTask), pump: primaryPump, request: request,
+                            fallback: fallback, continuation: continuation, racingLocal: nil)
+    }
+
+    /// Handles whatever the primary ultimately did, whether it answered
+    /// inside `raceTimeout` or (slowly) won the race against local anyway.
+    private func settlePrimary(
+        _ outcome: Outcome,
+        pump: TokenPump,
+        request: ChatRequest,
+        fallback: ChatProvider,
+        continuation: AsyncThrowingStream<ChatEvent, Error>.Continuation,
+        racingLocal: (task: Task<String?, Error>, pump: TokenPump)?
+    ) async {
+        switch outcome {
+        case .token(let token):
+            racingLocal?.task.cancel()
+            continuation.yield(.token(token))
+            await drainRemaining(pump, provider: primary, request: request,
+                                isFallback: false, continuation: continuation)
+        case .empty:
+            racingLocal?.task.cancel()
+            log("provider=\(primary.name) done", .debug)
+            continuation.yield(.done)
+            continuation.finish()
+        case .failed(let error):
+            log("provider=\(primary.name) FAILED, falling back to \(fallback.name). error=\(error)", .error)
+            continuation.yield(.fallback(provider: fallback.name, error: String(describing: error)))
+            if let racingLocal {
+                // Local is already in flight from the race; use its result
+                // directly rather than starting a second, redundant request.
+                switch await classify(racingLocal.task) {
+                case .token(let token):
+                    continuation.yield(.token(token))
+                    await drainRemaining(racingLocal.pump, provider: fallback, request: request,
+                                        isFallback: true, continuation: continuation)
+                case .empty:
+                    continuation.yield(.done)
+                    continuation.finish()
+                case .failed(let localError):
+                    log("provider stream failed terminally: \(localError)", .error)
+                    continuation.finish(throwing: localError)
+                }
+            } else {
+                let freshPump = TokenPump(fallback.stream(request))
+                await drainRemaining(freshPump, provider: fallback, request: request,
+                                    isFallback: true, continuation: continuation)
+            }
+        }
+    }
+
+    /// Streams whatever `pump` has left; a mid-stream primary failure
+    /// restarts fresh on the fallback (matching the pre-race behavior), a
+    /// mid-stream fallback failure is terminal (no further fallback exists).
+    private func drainRemaining(
+        _ pump: TokenPump,
+        provider: ChatProvider,
+        request: ChatRequest,
+        isFallback: Bool,
+        continuation: AsyncThrowingStream<ChatEvent, Error>.Continuation
+    ) async {
+        do {
+            while let token = try await pump.next() {
+                continuation.yield(.token(token))
+            }
+            log("provider=\(provider.name) done\(isFallback ? " (fallback)" : "")", isFallback ? .info : .debug)
+            continuation.yield(.done)
+            continuation.finish()
+        } catch {
+            guard !isFallback, let fallback, fallback.name != primary.name else {
+                log("provider stream failed terminally: \(error)", .error)
+                continuation.finish(throwing: error)
+                return
+            }
+            log("provider=\(provider.name) FAILED, falling back to \(fallback.name). error=\(error)", .error)
+            continuation.yield(.fallback(provider: fallback.name, error: String(describing: error)))
+            let freshPump = TokenPump(fallback.stream(request))
+            await drainRemaining(freshPump, provider: fallback, request: request,
+                                isFallback: true, continuation: continuation)
         }
     }
 }

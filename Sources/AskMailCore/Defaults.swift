@@ -32,6 +32,10 @@ public enum Defaults {
     public static let answerTokenLimit = 800
     public static let temperature = 0.2
     public static let sessionTurnCap = 3
+    /// How long a cloud primary gets before ProviderRouter starts racing
+    /// local alongside it (FR-4 extension), so a slow cloud response doesn't
+    /// force the user to wait out its full worst-case timeout.
+    public static let providerRaceTimeout: Duration = .seconds(5)
 
     // MARK: Ingestion
     /// Apple Mail's container: `~/Library/Mail`. TCC-protected — reading it (or
