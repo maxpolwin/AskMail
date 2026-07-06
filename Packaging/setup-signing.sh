@@ -2,7 +2,17 @@
 # One-time: create a stable self-signed code-signing identity in the login
 # keychain so build-app.sh can sign AskMail.app with a constant designated
 # requirement. That lets a single Full Disk Access grant survive rebuilds
-# (ad-hoc signing changes the cdhash every build and breaks the grant).
+# (ad-hoc signing changes the cdhash every build and breaks it).
+#
+# Dev-only identity — release builds must use a real Developer ID
+# ("Developer ID Application: ...", ASKMAIL_SIGN_IDENTITY in build-app.sh).
+#
+# Hardening H-5: the private key is imported scoped to codesign only (`-T`),
+# not `-A` ("any app, no prompt") — `-A` let any local process on the
+# machine sign code as AskMail and inherit its Full Disk Access grant, which
+# defeats the point of a designated-requirement-bound TCC grant. The PKCS#12
+# export passphrase is random per run and never printed; it only exists to
+# round-trip the key into the keychain within this script.
 #
 # Safe to re-run: it no-ops if the identity already exists. See docs/dev-signing.md.
 set -euo pipefail
@@ -35,11 +45,17 @@ EOF
 echo "Generating self-signed code-signing certificate…"
 openssl req -x509 -newkey rsa:2048 -nodes \
   -keyout key.pem -out cert.pem -days 3650 -config openssl.cnf >/dev/null 2>&1
-openssl pkcs12 -export -inkey key.pem -in cert.pem \
-  -out ident.p12 -passout pass:askmaildev -name "$CN" >/dev/null 2>&1
 
-echo "Importing into login keychain (-A avoids per-app codesign prompts)…"
-security import ident.p12 -k "$KEYCHAIN" -P askmaildev -A
+# Random, single-use passphrase for the PKCS#12 round-trip only — never
+# echoed, never reused, discarded with $WORK on exit.
+P12_PASS="$(openssl rand -base64 24)"
+openssl pkcs12 -export -inkey key.pem -in cert.pem \
+  -out ident.p12 -passout "pass:$P12_PASS" -name "$CN" >/dev/null 2>&1
+
+echo "Importing into login keychain, scoped to codesign only (no prompt-free"
+echo "access for other apps)…"
+security import ident.p12 -k "$KEYCHAIN" -P "$P12_PASS" -T /usr/bin/codesign
+unset P12_PASS
 
 echo "Done. Now run Packaging/build-app.sh, then grant Full Disk Access to"
 echo ".build/AskMail.app once — the grant will persist across rebuilds."

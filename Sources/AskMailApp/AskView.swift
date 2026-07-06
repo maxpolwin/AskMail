@@ -54,6 +54,10 @@ private struct SourceRow: View {
     let highContrast: Bool
     @State private var hovering = false
     @State private var showScore = false
+    /// Routes through the same H-14 gate as every other link sink (set by
+    /// AskView's `.environment(\.openURL, ...)`), even though a citation URL
+    /// is always the trusted `message://` scheme today.
+    @Environment(\.openURL) private var openURL
 
     var body: some View {
         HStack(spacing: 8) {
@@ -96,7 +100,7 @@ private struct SourceRow: View {
         if accessibleLinks {
             Button {
                 if let url = CitationRenderer.messageURL(messageID: ref.messageID) {
-                    NSWorkspace.shared.open(url)
+                    openURL(url)
                 }
             } label: {
                 Text(styledLine)
@@ -332,6 +336,11 @@ struct AskView: View {
     @State private var answerHeight: CGFloat = 0
     @State private var copied = false
     @State private var hoveringCard = false
+    /// H-14: an `https(s)://` link found in model output (Markdown answer or,
+    /// in principle, a citation) waiting on the user's explicit confirmation
+    /// before AskMail opens anything outside the app. Non-nil drives the
+    /// confirmation alert below.
+    @State private var pendingExternalURL: URL?
     /// Height of everything in the card above the scroll area (question field,
     /// hairline, warning), measured live so `scrollCap` can subtract it.
     @State private var chromeHeight: CGFloat = 0
@@ -364,6 +373,44 @@ struct AskView: View {
         }
         .padding(24)
         .onExitCommand { onDismiss() }   // Esc dismisses (and clears the session)
+        // H-14: the single gate every link sink in this view routes through —
+        // both the answer's rendered Markdown links (styledAnswer) and the
+        // citation button's programmatic open (SourceRow, via @Environment)
+        // — so a prompt-injected email can't turn model output into a
+        // silently-followed arbitrary-scheme link. See LinkPolicy.
+        .environment(\.openURL, OpenURLAction(handler: handleLinkOpen))
+        .alert("Open Link?", isPresented: Binding(
+            get: { pendingExternalURL != nil },
+            set: { if !$0 { pendingExternalURL = nil } }
+        )) {
+            Button("Cancel", role: .cancel) { pendingExternalURL = nil }
+            Button("Open") {
+                if let url = pendingExternalURL { NSWorkspace.shared.open(url) }
+                pendingExternalURL = nil
+            }
+        } message: {
+            Text(pendingExternalURL?.absoluteString ?? "")
+        }
+    }
+
+    /// The H-14 policy in effect: only a trusted `message://` link opens
+    /// immediately; `http(s)://` waits on `pendingExternalURL`'s confirmation
+    /// alert; everything else (`javascript:`, `file:`, a bare custom scheme,
+    /// ...) is swallowed — the tap does nothing, and nothing is opened.
+    private func handleLinkOpen(_ url: URL) -> OpenURLAction.Result {
+        switch LinkPolicy.action(for: url) {
+        case .open:
+            NSWorkspace.shared.open(url)
+        case .confirmThenOpen:
+            pendingExternalURL = url
+        case .block:
+            // Log only the scheme, never the full URL: the destination came
+            // from model output (indirectly, mail content) and shouldn't be
+            // retained verbatim at a level shipped on by default.
+            RollingLog.shared.log(
+                "blocked answer link with scheme \u{201C}\(url.scheme ?? "(none)")\u{201D}", level: .info)
+        }
+        return .handled
     }
 
     /// The scroll area grows with the panel: taller window → more answer

@@ -49,6 +49,12 @@ from the raw binary. If you already granted Full Disk Access to the raw
 `askmail` binary, remove that (icon-less) entry from Privacy & Security >
 Full Disk Access and re-grant it to `AskMail.app` once you launch the bundle.
 
+Mailbox ingestion also needs the bundle: untrusted `.emlx`/MIME/HTML/PDF
+parsing runs in a sandboxed XPC service (hardening H-6, see
+[docs/hardening.md](docs/hardening.md)) that only exists inside
+`AskMail.app/Contents/XPCServices` — `swift run askmail` has nowhere to load
+it from, so real ingestion needs the packaged app, not the bare binary.
+
 Runtime dependencies (not needed for tests): [Ollama](https://ollama.com)
 with `nomic-embed-text` pulled for embeddings and a local chat model
 (`qwen2.5:7b` default). Cloud providers are optional; keys go in the macOS

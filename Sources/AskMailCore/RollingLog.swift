@@ -42,8 +42,14 @@ public final class RollingLog: @unchecked Sendable {
     private let retention: TimeInterval
     private var minLevel: LogLevel
 
+    /// Default verbosity is `.info`, not `.debug` (hardening H-23): `.debug`
+    /// lines can include the full assembled prompt (retrieved mail text) and
+    /// full answer text, so shipping that as the always-on default would
+    /// retain mail excerpts in memory without the user opting in. Callers
+    /// that need verbose capture (e.g. `SettingsStore` restoring a
+    /// user-chosen level) set `currentMinLevel` explicitly after init.
     public init(retentionHours: Double = Defaults.logRetentionHours,
-                minLevel: LogLevel = .debug) {
+                minLevel: LogLevel = .info) {
         self.retention = retentionHours * 3600
         self.minLevel = minLevel
     }

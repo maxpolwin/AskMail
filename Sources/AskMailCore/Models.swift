@@ -35,6 +35,49 @@ public struct ParsedEmail: Sendable {
     public var dateUnix: Int64 { Int64(date?.timeIntervalSince1970 ?? 0) }
 }
 
+/// The result of parsing one .emlx file, ready for ingestion: unlike
+/// `ParsedEmail`, PDF attachments are already reduced to extracted text (or
+/// nil, mirroring `PdfText.extract`'s contract) rather than raw bytes.
+///
+/// This is the hardening-H-6 boundary type: the sandboxed parser XPC service
+/// runs `EmlxParser.parse` *and* `PdfText.extract` (the PDFKit call) inside
+/// itself and returns this, so raw untrusted PDF bytes never cross back into
+/// the FDA-holding main process to be parsed there. `Codable` because it
+/// crosses the XPC boundary as JSON (`ParserXPCProtocol`).
+public struct IngestableEmail: Sendable, Codable, Equatable {
+    /// One PDF attachment's extracted text, or nil if PDFKit found none
+    /// (locked, image-only, or unreadable) — mirrors `PdfText.extract`.
+    public struct PdfAttachmentText: Sendable, Codable, Equatable {
+        public var filename: String
+        public var text: String?
+
+        public init(filename: String, text: String?) {
+            self.filename = filename
+            self.text = text
+        }
+    }
+
+    public var messageID: String
+    public var subject: String
+    public var sender: String
+    public var dateUnix: Int64
+    public var bodyText: String
+    public var pdfAttachments: [PdfAttachmentText]
+    /// Attachments skipped (e.g. over the size cap), for logging.
+    public var skippedAttachments: [String]
+
+    public init(messageID: String, subject: String, sender: String, dateUnix: Int64,
+               bodyText: String, pdfAttachments: [PdfAttachmentText], skippedAttachments: [String]) {
+        self.messageID = messageID
+        self.subject = subject
+        self.sender = sender
+        self.dateUnix = dateUnix
+        self.bodyText = bodyText
+        self.pdfAttachments = pdfAttachments
+        self.skippedAttachments = skippedAttachments
+    }
+}
+
 /// A retrieval-ready chunk with the email metadata needed for prompt assembly
 /// and citation rendering.
 public struct ContextChunk: Sendable, Equatable {

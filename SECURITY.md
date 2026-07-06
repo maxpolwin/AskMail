@@ -26,11 +26,18 @@ selected one.
   forces a multi-hour Mail rebuild.
 - `.emlx` and PDF parsing operate on untrusted input. Fail closed on parse
   errors; never execute or follow embedded content. Cap attachment size.
+- That parsing — including the PDFKit call, given PDF/CoreGraphics parsers'
+  history of memory-corruption bugs — runs in a sandboxed, non-FDA,
+  no-network XPC child process, not in the app holding Full Disk Access and
+  the Keychain (hardening H-6; see docs/hardening.md).
 
 ## Logging
-- Debug logs are capped at a 12-hour rolling window.
-- Logs contain question and answer text (needed for tester bug reports),
-  so the "Copy logs" action shows a content warning first.
+- Debug logs are capped at a 12-hour rolling window; the default verbosity
+  is `.info`, which does not capture prompt/answer/mail-excerpt text — only
+  raising it to Debug does (hardening H-23).
+- At Debug verbosity, logs contain question and answer text (needed for
+  tester bug reports), so the "Copy logs" action shows a content warning
+  first regardless of the current level.
 - Logs never contain Keychain values, full email bodies beyond the chunks
   already in a query, or raw `Message-ID` headers in clear text where
   avoidable.

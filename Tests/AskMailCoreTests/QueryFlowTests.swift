@@ -342,6 +342,28 @@ final class QueryServiceTests: XCTestCase {
         XCTAssertEqual(text, Defaults.noMatchMessage)
     }
 
+    // Hardening H-23: the empty-retrieval line is the only question/answer
+    // content logged at a level shipped on by default (.info), so it must be
+    // capped rather than verbatim — a long pasted "question" shouldn't retain
+    // arbitrarily long user-typed content at the default verbosity.
+    func testEmptyRetrievalLogsCappedQuestionAtInfoLevel() async throws {
+        let store = try SQLiteStore.inMemory()
+        var captured: [(String, RollingLog.LogLevel)] = []
+        let service = QueryService(store: store, embedder: StubEmbedder(),
+                                   log: { line, level in captured.append((line, level)) })
+        let longQuestion = String(repeating: "x", count: 500)
+        _ = try await service.ask(longQuestion, settings: QuerySettings())
+
+        let infoLines = captured.filter { $0.1 == .info }
+        XCTAssertTrue(infoLines.contains { $0.0.contains("retrieval EMPTY") })
+        for (line, _) in infoLines {
+            XCTAssertLessThan(line.count, longQuestion.count,
+                              "the .info line must not embed the full question verbatim")
+        }
+        XCTAssertEqual(QueryService.capped(longQuestion), String(repeating: "x", count: 200) + "\u{2026}")
+        XCTAssertEqual(QueryService.capped("short"), "short")
+    }
+
     // When Ollama isn't installed/running, the embed call throws a raw
     // URLError; AskViewModel relies on ProviderError.isConnectionFailure to
     // turn that into "Ollama isn't running" instead of showing it verbatim.

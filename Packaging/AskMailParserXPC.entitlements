@@ -1,0 +1,20 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!--
+  Hardening H-6: the parser XPC service is App-Sandboxed with NO other
+  entitlement — no file access, no network client, no Mail/FDA anything.
+  It only ever touches the bytes handed to it over the XPC connection
+  (in-memory `Data`, which needs no entitlement to receive) and returns
+  extracted text; it never opens a file or a socket itself. If a parser
+  exploit ever did achieve code execution here, the sandbox — not just the
+  process boundary — still blocks it from reading the mailbox, the
+  Keychain, or reaching the network.
+-->
+<plist version="1.0">
+<dict>
+	<key>com.apple.security.app-sandbox</key>
+	<true/>
+	<key>com.apple.security.get-task-allow</key>
+	<false/>
+</dict>
+</plist>

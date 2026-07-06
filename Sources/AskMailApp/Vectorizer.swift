@@ -79,10 +79,14 @@ final class Vectorizer: ObservableObject {
         do {
             let store = try SQLiteStore(path: SettingsStore.databasePath)
             let model = settings.embeddingModel
+            // XPCEmailParser (hardening H-6): all untrusted .emlx/MIME/HTML/PDF
+            // parsing runs in the sandboxed parser XPC service, never in this
+            // (FDA-holding) process.
             let ingestor = MailboxIngestor(store: store,
                                            embedder: OllamaEmbedder(model: model),
                                            account: storageKey,
-                                           embeddingStamp: await Self.embeddingStamp(for: model))
+                                           embeddingStamp: await Self.embeddingStamp(for: model),
+                                           parser: XPCEmailParser())
             let files = EmlxLocator.scan(accountDirectory: directory)
                 .sorted { $0.sourceID < $1.sourceID }
             // Failure rows whose file no longer scans (excluded mailbox,
@@ -158,10 +162,14 @@ final class Vectorizer: ObservableObject {
                 return nil
             }
             let model = settings.embeddingModel
+            // XPCEmailParser (hardening H-6): all untrusted .emlx/MIME/HTML/PDF
+            // parsing runs in the sandboxed parser XPC service, never in this
+            // (FDA-holding) process.
             let ingestor = MailboxIngestor(store: store,
                                            embedder: OllamaEmbedder(model: model),
                                            account: storageKey,
-                                           embeddingStamp: await Self.embeddingStamp(for: model))
+                                           embeddingStamp: await Self.embeddingStamp(for: model),
+                                           parser: XPCEmailParser())
             let files = EmlxLocator.scan(accountDirectory: directory)
                 .filter { failedIDs.contains($0.sourceID) }
                 .sorted { $0.sourceID < $1.sourceID }

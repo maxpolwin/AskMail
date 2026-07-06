@@ -106,8 +106,12 @@ final class SettingsStore: ObservableObject {
         accountID = defaults.string(forKey: "accountID") ?? ""
         accountEmail = defaults.string(forKey: "accountEmail") ?? ""
         lastVectorized = defaults.object(forKey: "lastVectorized") as? Date
+        // Default to .info, not .debug (hardening H-23): .debug logs the full
+        // assembled prompt (retrieved mail text) and full answer text
+        // (QueryService), so shipping it as the default would retain mail
+        // excerpts in the 12h rolling log without the user ever opting in.
         let storedLogLevel = defaults.object(forKey: "logLevel") as? Int
-        logLevel = storedLogLevel.flatMap(RollingLog.LogLevel.init(rawValue:)) ?? .debug
+        logLevel = storedLogLevel.flatMap(RollingLog.LogLevel.init(rawValue:)) ?? .info
         let keyCode = defaults.object(forKey: "hotkeyKeyCode") as? Int
         hotkeyKeyCode = keyCode ?? ShortcutSymbols.defaultKeyCode
         let modifiers = defaults.object(forKey: "hotkeyModifiers") as? Int

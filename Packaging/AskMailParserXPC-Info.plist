@@ -1,0 +1,34 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+	<key>CFBundleName</key>
+	<string>AskMailParser</string>
+	<key>CFBundleIdentifier</key>
+	<string>com.askmail.app.parser</string>
+	<key>CFBundleExecutable</key>
+	<string>AskMailParserXPC</string>
+	<key>CFBundlePackageType</key>
+	<string>XPC!</string>
+	<key>CFBundleShortVersionString</key>
+	<string>0.1.0</string>
+	<key>CFBundleVersion</key>
+	<string>1</string>
+	<key>CFBundleInfoDictionaryVersion</key>
+	<string>6.0</string>
+	<key>LSMinimumSystemVersion</key>
+	<string>14.0</string>
+	<!--
+	  Application-embedded XPC service (hardening H-6): the app connects to
+	  it via NSXPCConnection(serviceName: "com.askmail.app.parser")
+	  (Sources/AskMailCore/ParserXPCProtocol.swift). macOS launches it on
+	  demand from Contents/XPCServices and tears it down when idle — it is
+	  never launched directly and never registers with launchd itself.
+	-->
+	<key>XPCService</key>
+	<dict>
+		<key>ServiceType</key>
+		<string>Application</string>
+	</dict>
+</dict>
+</plist>

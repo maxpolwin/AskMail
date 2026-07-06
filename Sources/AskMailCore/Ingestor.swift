@@ -68,18 +68,26 @@ public final class MailboxIngestor {
     /// vectors from two models never mix. nil skips the stamp (legacy path).
     private let embeddingStamp: EmbeddingStamp?
     private let log: (String, RollingLog.LogLevel) -> Void
+    /// Turns a raw .emlx file into an `IngestableEmail`. Production
+    /// (AskMailApp) injects `XPCEmailParser`, running all untrusted
+    /// MIME/HTML/PDF parsing in a sandboxed child process (hardening H-6);
+    /// the default here is the in-process parser, correct for tests, whose
+    /// synthetic fixtures don't need that isolation.
+    private let parser: EmailParsing
 
     public init(store: SQLiteStore,
                 embedder: EmbeddingProvider,
                 account: String,
                 chunker: Chunker = Chunker(),
                 embeddingStamp: EmbeddingStamp? = nil,
+                parser: EmailParsing = InProcessEmailParser(),
                 log: @escaping (String, RollingLog.LogLevel) -> Void = { RollingLog.shared.log($0, level: $1) }) {
         self.store = store
         self.embedder = embedder
         self.account = account
         self.chunker = chunker
         self.embeddingStamp = embeddingStamp
+        self.parser = parser
         self.log = log
     }
 
@@ -95,7 +103,7 @@ public final class MailboxIngestor {
 
         for (index, file) in files.enumerated() {
             do {
-                let email = try EmlxParser.parse(fileURL: file)
+                let email = try await parser.parse(fileURL: file)
                 try await ingest(email: email)
                 ingested += 1
                 maxDate = max(maxDate, email.dateUnix)
@@ -163,7 +171,7 @@ public final class MailboxIngestor {
                 continue
             }
             do {
-                let email = try EmlxParser.parse(fileURL: file.url)
+                let email = try await parser.parse(fileURL: file.url)
                 let chunkCount = try await ingest(email: email)
                 try store.recordIngested(sourceID: file.sourceID, fingerprint: file.fingerprint)
                 try? store.clearIngestFailure(sourceID: file.sourceID)
@@ -226,14 +234,19 @@ public final class MailboxIngestor {
 
     /// Returns the number of chunks stored, so callers can tell an ingested
     /// message from an empty one (zero chunks = nothing searchable).
+    ///
+    /// Takes `IngestableEmail`, not `ParsedEmail`: PDF text is already
+    /// extracted by the time it reaches here (either in-process for tests,
+    /// or inside the sandboxed parser XPC service in production), so this
+    /// method never calls PDFKit itself (hardening H-6).
     @discardableResult
-    public func ingest(email: ParsedEmail) async throws -> Int {
+    public func ingest(email: IngestableEmail) async throws -> Int {
         var pieces: [(source: ChunkSource, text: String)] = []
         for text in chunker.chunk(email.bodyText) {
             pieces.append((.body, text))
         }
         for attachment in email.pdfAttachments {
-            guard let pdfText = PdfText.extract(data: attachment.data) else {
+            guard let pdfText = attachment.text else {
                 log("ingest skip pdf=\(attachment.filename) (no extractable text)", .debug)
                 continue
             }

@@ -83,7 +83,10 @@ public final class QueryService: @unchecked Sendable {
         // 2. Empty-retrieval case (contract §7): never call the LLM with an
         //    empty context.
         guard !chunks.isEmpty else {
-            log("retrieval EMPTY question=\"\(question)\"", .info)
+            // Capped rather than verbatim: this is the only question/answer
+            // content logged at a level shipped on by default (.info); the
+            // full text stays reachable at .debug via the lines below.
+            log("retrieval EMPTY question=\"\(Self.capped(question))\"", .info)
             let events = AsyncThrowingStream<ChatEvent, Error> { continuation in
                 continuation.yield(.token(Defaults.noMatchMessage))
                 continuation.yield(.done)
@@ -259,5 +262,12 @@ public final class QueryService: @unchecked Sendable {
     private var logSendable: @Sendable (String, RollingLog.LogLevel) -> Void {
         let log = self.log
         return { line, level in log(line, level) }
+    }
+
+    /// Caps text logged at a level shipped on by default, keeping the log
+    /// useful for "did retrieval fire" diagnosis without retaining arbitrary
+    /// user-typed content at a verbosity most users never raise.
+    static func capped(_ text: String, limit: Int = 200) -> String {
+        text.count > limit ? String(text.prefix(limit)) + "\u{2026}" : text
     }
 }

@@ -1,0 +1,27 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!--
+  Hardening H-2: deliberately near-empty. AskMail is NOT sandboxed — Full
+  Disk Access plus scanning ~/Library/Mail is incompatible with the App
+  Sandbox (docs/ollama-onboarding-spec.md) — so this file does not add
+  com.apple.security.app-sandbox.
+
+  It exists to pin get-task-allow=false and to document, by omission, that
+  the app claims none of the entitlements that would weaken the hardened
+  runtime's anti-injection defenses:
+    - com.apple.security.cs.disable-library-validation
+    - com.apple.security.cs.disable-executable-page-protection
+    - com.apple.security.cs.allow-dyld-environment-variables
+    - com.apple.security.cs.allow-unsigned-executable-memory
+    - com.apple.security.get-task-allow (true)
+  None of these are needed: AskMail links only system frameworks + the
+  system libsqlite3 (see Package.swift), and spawns `ollama` as a separate
+  signed process (OllamaEngine.swift) rather than loading anything into
+  this process — library validation covers that with zero relaxation.
+-->
+<plist version="1.0">
+<dict>
+	<key>com.apple.security.get-task-allow</key>
+	<false/>
+</dict>
+</plist>
