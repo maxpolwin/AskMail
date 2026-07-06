@@ -11,6 +11,18 @@ enum Theme {
     /// the whole app tracks whatever highlight colour the user picked.
     static let accent = Color(nsColor: .controlAccentColor)
 
-    /// Quiet 1pt hairline that adapts to light/dark.
-    static let hairline = Color.primary.opacity(0.14)
+    /// Opacity for the 1pt hairline. Broken out as a pure function (rather
+    /// than baked straight into `hairline`) so it's unit-testable without
+    /// comparing `Color` values.
+    static func hairlineOpacity(highContrast: Bool) -> Double {
+        highContrast ? 0.55 : 0.14
+    }
+
+    /// Quiet 1pt hairline that adapts to light/dark. Pass `highContrast: true`
+    /// for Settings ▸ Accessibility ▸ "Higher-contrast panel" — a much less
+    /// subtle line in both appearances, closer to what macOS's system
+    /// Increase Contrast setting expects.
+    static func hairline(highContrast: Bool) -> Color {
+        Color.primary.opacity(hairlineOpacity(highContrast: highContrast))
+    }
 }

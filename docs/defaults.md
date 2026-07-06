@@ -52,10 +52,12 @@ strings in a document.
 ## UI
 | Parameter | Default | Notes |
 |---|---|---|
-| Global hotkey | Control+Option+Space | user-configurable. Not Cmd+B (Bold conflict). |
+| Global hotkey | Control+Shift+Space | user-configurable. Not Cmd+B (Bold conflict), and deliberately not Control+Option/Caps Lock — those are VoiceOver's own modifier prefix, and Control+Option+Space is VoiceOver's built-in "click the current item" command. |
 | Panel open target | < 200 ms | |
 | First token target | < 1 s local, < 200 ms cloud (stretch) | measure; relax cloud if unreachable. |
 | Theme | dark primary | glass surfaces, color-blind-inclusive. |
+| Speak answer aloud | off | Settings ▸ Accessibility; user-configurable. On-device only (AVSpeechSynthesizer, no network). Also enables keyboard/Switch Control/VoiceOver-reachable Close button and citation links in the panel. |
+| Higher-contrast panel | off | Settings ▸ Accessibility; user-configurable. Strengthens Theme.hairline in both light and dark appearance. |
 
 ## Logging
 | Parameter | Default | Notes |

@@ -3,16 +3,18 @@ import Carbon.HIToolbox
 import Foundation
 
 /// Global hotkey via Carbon RegisterEventHotKey. Default is
-/// Control+Option+Space; deliberately not Cmd+B (Bold conflict). Verified
-/// against FR-1 on a German layout by using key codes, not characters.
-/// The binding can be changed at runtime from Settings via `register`.
+/// Control+Shift+Space (see ShortcutSymbols.defaultModifiers for why it's not
+/// Control+Option — that collides with VoiceOver's own modifier keys — nor
+/// Cmd+B, the Bold conflict). Verified against FR-1 on a German layout by
+/// using key codes, not characters. The binding can be changed at runtime
+/// from Settings via `register`.
 final class HotkeyManager {
     private var hotKeyRef: EventHotKeyRef?
     private var eventHandler: EventHandlerRef?
     private let handler: @MainActor () -> Void
 
-    init(keyCode: UInt32 = UInt32(kVK_Space),
-         modifiers: UInt32 = UInt32(controlKey | optionKey),
+    init(keyCode: UInt32 = UInt32(ShortcutSymbols.defaultKeyCode),
+         modifiers: UInt32 = UInt32(ShortcutSymbols.defaultModifiers),
          handler: @escaping @MainActor () -> Void) {
         self.handler = handler
 

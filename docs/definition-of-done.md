@@ -5,7 +5,7 @@ passes. Maps to the FRs in Section A7 of the requirements document.
 
 | FR | Done when |
 |---|---|
-| FR-1 Hotkey activation | Pressing the configured hotkey toggles the floating panel open and closed with focus in the input; verified on a German keyboard layout; default is Control+Option+Space and it does not intercept Cmd+B. |
+| FR-1 Hotkey activation | Pressing the configured hotkey toggles the floating panel open and closed with focus in the input; verified on a German keyboard layout; default is Control+Shift+Space and it does not intercept Cmd+B or collide with VoiceOver's own Control+Option modifier keys. |
 | FR-2 Ask a question | A typed question returns a streamed answer containing at least one superscript citation whose tap opens the correct source email in Mail via `message://`; the numbered source list matches the in-text superscripts. |
 | FR-3 Multi-turn session | A follow-up that refers to the prior turn ("the attachment on that one") resolves correctly using the in-memory buffer; closing the panel clears the buffer, verified by a fresh session not recalling the prior question. |
 | FR-4 Cloud fallback | With a deliberately invalid cloud key, the query still returns an answer from the local model, a non-blocking warning is shown, and the full error body appears in the 12 h log. |
@@ -24,3 +24,9 @@ passes. Maps to the FRs in Section A7 of the requirements document.
   prompt contract is wired in.
 - Dark mode and color-blind-inclusive rendering verified on the panel and
   settings.
+- Every new interactive control carries a clear accessibility label (so
+  VoiceOver and Voice Control both name it correctly) and is reachable
+  without a mouse; a new global shortcut or keyboard-swallowing control is
+  checked against VoiceOver's own Control+Option command space before it
+  ships. Settings ▸ Accessibility features (Speak answer aloud,
+  Higher-contrast panel) are exercised manually at least once per release.

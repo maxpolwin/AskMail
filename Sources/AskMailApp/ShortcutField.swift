@@ -26,6 +26,10 @@ struct ShortcutField: View {
         }
         .buttonStyle(.bordered)
         .help("Click, then press a new key combination. Esc cancels.")
+        .accessibilityLabel(recording
+            ? "Recording new keyboard shortcut"
+            : "Keyboard shortcut: \(ShortcutSymbols.spokenDescription(carbonModifiers: carbonModifiers, keyLabel: label))")
+        .accessibilityHint("Click, then press a new key combination. Escape cancels.")
         .onChange(of: recording) { _, now in
             now ? startCapture() : stopCapture()
         }
@@ -64,6 +68,16 @@ struct ShortcutField: View {
 
 /// Formatting + modifier conversion shared by the recorder and any display.
 enum ShortcutSymbols {
+    /// Shipped default: Control+Shift+Space. Deliberately NOT Control+Option
+    /// (or Caps Lock alone) — that's VoiceOver's own "VO keys" modifier
+    /// prefix, and Control+Option+Space is literally VoiceOver's built-in
+    /// "click the current item" command, so the previous default silently
+    /// broke (or double-fired) for VoiceOver users. Also not Cmd+B (Bold
+    /// conflict). Still user-configurable via the recorder above.
+    static let defaultKeyCode = kVK_Space
+    static let defaultModifiers = Int(controlKey | shiftKey)
+    static let defaultKeyLabel = "Space"
+
     static func carbonModifiers(from flags: NSEvent.ModifierFlags) -> UInt32 {
         var carbon: UInt32 = 0
         if flags.contains(.control) { carbon |= UInt32(controlKey) }
@@ -80,6 +94,20 @@ enum ShortcutSymbols {
         if carbonModifiers & shiftKey   != 0 { symbols += "\u{21E7}" }  // ⇧
         if carbonModifiers & cmdKey     != 0 { symbols += "\u{2318}" }  // ⌘
         return symbols + keyLabel
+    }
+
+    /// Stable, speakable name for Voice Control / VoiceOver. The on-screen
+    /// combo is glyphs (e.g. "⌃⇧Space"), which don't reliably match what a
+    /// user says or hears; this spells modifiers out as words instead, and
+    /// stays the same regardless of the recorder's current visual state.
+    static func spokenDescription(carbonModifiers: Int, keyLabel: String) -> String {
+        var words: [String] = []
+        if carbonModifiers & controlKey != 0 { words.append("Control") }
+        if carbonModifiers & optionKey  != 0 { words.append("Option") }
+        if carbonModifiers & shiftKey   != 0 { words.append("Shift") }
+        if carbonModifiers & cmdKey     != 0 { words.append("Command") }
+        words.append(keyLabel)
+        return words.joined(separator: " ")
     }
 
     /// Special keys by name, otherwise the base character the physical key

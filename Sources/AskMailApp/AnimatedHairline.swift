@@ -6,17 +6,19 @@ import SwiftUI
 /// across it — replacing the old spinner. Respects Reduce Motion.
 struct AnimatedHairline: View {
     var active: Bool
+    /// Settings ▸ Accessibility ▸ "Higher-contrast panel".
+    var highContrast: Bool = false
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
     @State private var phase: CGFloat = 0
 
-    private static let base = Theme.hairline    // adapts both modes
+    private var base: Color { Theme.hairline(highContrast: highContrast) }  // adapts both modes
     private static let accent = Theme.accent
 
     var body: some View {
         GeometryReader { geo in
             let w = geo.size.width
             Rectangle()
-                .fill(Self.base)
+                .fill(base)
                 .overlay(alignment: .leading) {
                     if active && !reduceMotion {
                         LinearGradient(colors: [.clear, Self.accent, .clear],

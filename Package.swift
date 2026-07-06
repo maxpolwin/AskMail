@@ -21,5 +21,9 @@ let package = Package(
             name: "AskMailCoreTests",
             dependencies: ["AskMailCore"]
         ),
+        .testTarget(
+            name: "AskMailAppTests",
+            dependencies: ["AskMailApp"]
+        ),
     ]
 )

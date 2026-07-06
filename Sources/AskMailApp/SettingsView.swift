@@ -1,6 +1,5 @@
 import AppKit
 import AskMailCore
-import Carbon.HIToolbox
 import SwiftUI
 import UniformTypeIdentifiers
 
@@ -30,6 +29,9 @@ struct SettingsView: View {
     /// Suppresses the swap prompt while the picker is being programmatically
     /// reverted after a cancel.
     @State private var revertingEmbeddingModel = false
+    /// Scales with System Settings ▸ Accessibility ▸ Display ▸ Text Size
+    /// instead of staying pinned at 12pt.
+    @ScaledMetric(relativeTo: .caption) private var systemPromptFontSize: CGFloat = 12
 
     /// Setup steps derived from the same detections the sections use; the
     /// card vanishes once everything is green.
@@ -111,10 +113,10 @@ struct SettingsView: View {
                                   carbonModifiers: $settings.hotkeyModifiers,
                                   label: $settings.hotkeyKeyLabel)
                 }
-                Button("Reset to \u{2303}\u{2325}Space") {
-                    settings.hotkeyKeyCode = kVK_Space
-                    settings.hotkeyModifiers = controlKey | optionKey
-                    settings.hotkeyKeyLabel = "Space"
+                Button("Reset to \(ShortcutSymbols.display(carbonModifiers: ShortcutSymbols.defaultModifiers, keyLabel: ShortcutSymbols.defaultKeyLabel))") {
+                    settings.hotkeyKeyCode = ShortcutSymbols.defaultKeyCode
+                    settings.hotkeyModifiers = ShortcutSymbols.defaultModifiers
+                    settings.hotkeyKeyLabel = ShortcutSymbols.defaultKeyLabel
                 }
                 Text("Click the shortcut, then press a new combination. Include \u{2318}, \u{2325}, \u{2303}, or \u{21E7}.")
                     .font(.caption)
@@ -143,7 +145,7 @@ struct SettingsView: View {
                             Text("Preparing\u{2026}")
                                 .font(.caption)
                                 .foregroundStyle(.secondary)
-                            AnimatedHairline(active: true)
+                            AnimatedHairline(active: true, highContrast: settings.highContrastEnabled)
                         } else {
                             Text("Vectorizing \(progress.processed)/\(progress.total)")
                                 .font(.caption)
@@ -189,7 +191,7 @@ struct SettingsView: View {
                         if let fraction = progress.fraction {
                             ProgressView(value: fraction)
                         } else {
-                            AnimatedHairline(active: true)
+                            AnimatedHairline(active: true, highContrast: settings.highContrastEnabled)
                         }
                     }
                 }
@@ -317,7 +319,7 @@ struct SettingsView: View {
                 // the settings window.
                 DisclosureGroup(isExpanded: $showSystemPromptEditor) {
                     TextEditor(text: $settings.systemPrompt)
-                        .font(.system(size: 12, design: .monospaced))
+                        .font(.system(size: systemPromptFontSize, design: .monospaced))
                         .frame(minHeight: 160)
                     Button("Reset to default") {
                         settings.systemPrompt = Defaults.defaultSystemPrompt
@@ -331,6 +333,17 @@ struct SettingsView: View {
                         }
                     }
                 }
+            }
+
+            Section("Accessibility") {
+                Toggle("Speak answer aloud", isOn: $settings.speakAnswerEnabled)
+                Text("Adds a \u{201C}Speak\u{201D} button to the ask panel that reads the answer aloud on-device (no network) via AVSpeechSynthesizer. When VoiceOver is running, it borrows VoiceOver\u{2019}s own voice and rate instead of talking over it. Also keeps the panel\u{2019}s Close button and citation links reachable by keyboard, Switch Control, and Voice Control instead of mouse-hover only.")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                Toggle("Higher-contrast panel", isOn: $settings.highContrastEnabled)
+                Text("Strengthens the hairline divider and streaming indicator in both light and dark mode, closer to what macOS\u{2019}s system Increase Contrast setting expects.")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
             }
 
             Section("Diagnostics") {

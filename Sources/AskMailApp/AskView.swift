@@ -1,5 +1,6 @@
 import AppKit
 import AskMailCore
+import AVFoundation
 import SwiftUI
 
 /// The source body "domain (date): subject" (no number) — the shared bit the
@@ -45,17 +46,21 @@ private struct SourceRow: View {
     let number: Int
     let ref: SourceRef
     let percent: Int?
+    /// Settings ▸ Accessibility ▸ "Speak answer aloud" also makes citation
+    /// rows real Buttons — Tab-reachable and Return/Space-activatable —
+    /// instead of a plain Text carrying a `.link` attribute that only a mouse
+    /// can open.
+    let accessibleLinks: Bool
+    let highContrast: Bool
     @State private var hovering = false
     @State private var showScore = false
 
     var body: some View {
         HStack(spacing: 8) {
-            Text(line)
-                .font(.callout)
-                .lineLimit(1)
+            rowLabel
             Spacer(minLength: 8)
             if let percent {
-                RelevanceBar(fraction: Double(percent) / 100)
+                RelevanceBar(fraction: Double(percent) / 100, highContrast: highContrast)
             }
         }
         .contentShape(Rectangle())  // whole row (incl. gaps) is the hover target
@@ -67,7 +72,7 @@ private struct SourceRow: View {
                     .padding(.horizontal, 8)
                     .padding(.vertical, 3)
                     .background(.ultraThinMaterial, in: Capsule())
-                    .overlay(Capsule().strokeBorder(Theme.hairline, lineWidth: 0.5))
+                    .overlay(Capsule().strokeBorder(Theme.hairline(highContrast: highContrast), lineWidth: 0.5))
                     .allowsHitTesting(false)
                     .transition(.opacity)
             }
@@ -86,15 +91,42 @@ private struct SourceRow: View {
         }
     }
 
+    @ViewBuilder
+    private var rowLabel: some View {
+        if accessibleLinks {
+            Button {
+                if let url = CitationRenderer.messageURL(messageID: ref.messageID) {
+                    NSWorkspace.shared.open(url)
+                }
+            } label: {
+                Text(styledLine)
+                    .font(.callout)
+                    .lineLimit(1)
+            }
+            .buttonStyle(.plain)
+            .accessibilityLabel("Source \(number), \(sourceBody(ref))")
+        } else {
+            Text(line)
+                .font(.callout)
+                .lineLimit(1)
+        }
+    }
+
     /// The number in the system accent (matching the bar), the rest in primary
-    /// text like the answer. Carries a `message://` link so it opens on click
-    /// yet still selects and copies as text.
-    private var line: AttributedString {
+    /// text like the answer.
+    private var styledLine: AttributedString {
         var num = AttributedString("\(number)")
         num.foregroundColor = Theme.accent
         var body = AttributedString("  " + sourceBody(ref))
         body.foregroundColor = .primary
-        var line = num + body
+        return num + body
+    }
+
+    /// `styledLine` plus a `message://` link so it opens on click yet still
+    /// selects and copies as text — used only when `accessibleLinks` is off,
+    /// since a plain Text's `.link` attribute only ever opens via a mouse.
+    private var line: AttributedString {
+        var line = styledLine
         line.link = CitationRenderer.messageURL(messageID: ref.messageID)
         return line
     }
@@ -104,9 +136,10 @@ private struct SourceRow: View {
 /// the system accent. A floor keeps a weak-but-present source visible.
 private struct RelevanceBar: View {
     let fraction: Double
+    let highContrast: Bool
     var body: some View {
         Capsule()
-            .fill(Theme.hairline)
+            .fill(Theme.hairline(highContrast: highContrast))
             .frame(width: 54, height: 5)
             .overlay(alignment: .leading) {
                 Capsule()
@@ -118,12 +151,16 @@ private struct RelevanceBar: View {
 }
 
 @MainActor
-final class AskViewModel: ObservableObject {
+final class AskViewModel: NSObject, ObservableObject {
     @Published var question = ""
     @Published var answer = ""
     @Published var sources: [(number: Int, ref: SourceRef)] = []
     @Published var warning: String?
     @Published var isStreaming = false
+    /// True while `speak()`'s utterance is playing. Drives the Speak/Stop
+    /// button (only shown when Settings ▸ Accessibility ▸ "Speak answer
+    /// aloud" is on).
+    @Published var isSpeaking = false
 
     private var queryService: QueryService?
     private var currentTask: Task<Void, Never>?
@@ -131,10 +168,38 @@ final class AskViewModel: ObservableObject {
     /// while its captured generation is still current, so a run superseded by a
     /// resubmission (or a dismiss) drops its late results silently.
     private var generation = 0
+    private let speechSynthesizer = AVSpeechSynthesizer()
+
+    override init() {
+        super.init()
+        speechSynthesizer.delegate = self
+    }
+
+    /// Reads the answer aloud, entirely on-device (AVSpeechSynthesizer never
+    /// touches the network, so this doesn't affect SECURITY.md's local-only
+    /// guarantee). Only ever reachable when the user opted in via Settings ▸
+    /// Accessibility ▸ "Speak answer aloud" — see AskView's speakButton.
+    func speak() {
+        guard !answer.isEmpty else { return }
+        let utterance = AVSpeechUtterance(string: String(answerMarkdown(answer).characters))
+        // Borrow VoiceOver's own voice/rate instead of a second, differently
+        // voiced synthesizer talking over it when VoiceOver is running.
+        if NSWorkspace.shared.isVoiceOverEnabled {
+            utterance.prefersAssistiveTechnologySettings = true
+        }
+        isSpeaking = true
+        speechSynthesizer.speak(utterance)
+    }
+
+    func stopSpeaking() {
+        speechSynthesizer.stopSpeaking(at: .immediate)
+        isSpeaking = false
+    }
 
     func submit() {
         let text = question.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !text.isEmpty else { return }
+        if isSpeaking { stopSpeaking() }  // a resubmission shouldn't talk over the new answer
         // A resubmission supersedes any in-flight query: cancel it and rerun.
         currentTask?.cancel()
         generation += 1
@@ -217,6 +282,7 @@ final class AskViewModel: ObservableObject {
     }
 
     func endSession() {
+        if isSpeaking { stopSpeaking() }
         currentTask?.cancel()
         generation += 1  // supersede the cancelled run so it writes nothing back
         queryService?.clearSession()
@@ -244,14 +310,40 @@ final class AskViewModel: ObservableObject {
     }
 }
 
+extension AskViewModel: AVSpeechSynthesizerDelegate {
+    // AVSpeechSynthesizerDelegate callbacks aren't guaranteed to land on the
+    // main actor, so hop explicitly before touching @Published state.
+    nonisolated func speechSynthesizer(_ synthesizer: AVSpeechSynthesizer,
+                                       didFinish utterance: AVSpeechUtterance) {
+        Task { @MainActor in self.isSpeaking = false }
+    }
+
+    nonisolated func speechSynthesizer(_ synthesizer: AVSpeechSynthesizer,
+                                       didCancel utterance: AVSpeechUtterance) {
+        Task { @MainActor in self.isSpeaking = false }
+    }
+}
+
 struct AskView: View {
     @ObservedObject var model: AskViewModel
+    @ObservedObject private var settings = SettingsStore.shared
     var onDismiss: () -> Void = {}
 
     @State private var answerHeight: CGFloat = 0
     @State private var copied = false
     @State private var hoveringCard = false
     private let maxAnswerHeight: CGFloat = 320
+    /// Scale with System Settings ▸ Accessibility ▸ Display ▸ Text Size
+    /// instead of staying pinned at a fixed point size.
+    @ScaledMetric(relativeTo: .title2) private var questionFontSize: CGFloat = 21
+    @ScaledMetric(relativeTo: .body) private var answerFontSize: CGFloat = 14
+    @Environment(\.legibilityWeight) private var legibilityWeight
+
+    /// Settings ▸ Accessibility ▸ "Speak answer aloud" also opts this panel
+    /// into keyboard/Switch Control/VoiceOver-reachable controls for the
+    /// Close button and citation links, which are otherwise mouse-hover only
+    /// (see closeButton and SourceRow).
+    private var accessibleControlsEnabled: Bool { settings.speakAnswerEnabled }
 
     var body: some View {
         // The card hugs its content at the top of a clear window; everything
@@ -271,12 +363,14 @@ struct AskView: View {
             VStack(alignment: .leading, spacing: 10) {
                 TextField("Ask your email\u{2026}", text: $model.question)
                     .textFieldStyle(.plain)
-                    .font(.system(size: 21, weight: .light))  // ephemeral, light weight
+                    // Ephemeral, light weight — except Bold Text asked for
+                    // more legibility, which .light actively works against.
+                    .font(.system(size: questionFontSize, weight: legibilityWeight == .bold ? .regular : .light))
                     .foregroundStyle(.primary)                // adapts light/dark
                     .onSubmit { model.submit() }
                     .overlay(alignment: .trailing) { copiedToast }
 
-                AnimatedHairline(active: model.isStreaming)
+                AnimatedHairline(active: model.isStreaming, highContrast: settings.highContrastEnabled)
             }
 
             if let warning = model.warning {
@@ -294,7 +388,7 @@ struct AskView: View {
                     VStack(alignment: .leading, spacing: 12) {
                         if !model.answer.isEmpty {
                             Text(styledAnswer)
-                                .font(.system(size: 14))
+                                .font(.system(size: answerFontSize))
                                 .frame(maxWidth: .infinity, alignment: .leading)
                         }
                         if !model.sources.isEmpty {
@@ -305,7 +399,9 @@ struct AskView: View {
                             let pct = relevancePercents(model.sources)
                             ForEach(model.sources, id: \.number) { source in
                                 SourceRow(number: source.number, ref: source.ref,
-                                          percent: pct[source.number])
+                                          percent: pct[source.number],
+                                          accessibleLinks: accessibleControlsEnabled,
+                                          highContrast: settings.highContrastEnabled)
                             }
                         }
                     }
@@ -329,16 +425,24 @@ struct AskView: View {
         .background(.ultraThinMaterial, in: RoundedRectangle(cornerRadius: 16, style: .continuous))
         .overlay(
             RoundedRectangle(cornerRadius: 16, style: .continuous)
-                .strokeBorder(Theme.hairline, lineWidth: 0.5)
+                .strokeBorder(Theme.hairline(highContrast: settings.highContrastEnabled), lineWidth: 0.5)
         )
-        .overlay(alignment: .topTrailing) { closeButton }
+        .overlay(alignment: .topTrailing) {
+            HStack(spacing: 0) {
+                speakButton
+                closeButton
+            }
+        }
         .shadow(color: .black.opacity(0.28), radius: 20, x: 0, y: 10)
         .onHover { hoveringCard = $0 }
     }
 
     /// A quiet ✕ in the top-right corner, revealed on hover over the panel so
     /// it's obvious how to dismiss (Esc still works too). No chrome — the glyph
-    /// only, in muted colour. Hidden and non-interactive until hovered.
+    /// only, in muted colour. Hidden and non-interactive until hovered — unless
+    /// accessibleControlsEnabled, in which case it stays visible and
+    /// hit-testable always, since hover never happens for a keyboard, Switch
+    /// Control, or VoiceOver user.
     @ViewBuilder
     private var closeButton: some View {
         Button(action: onDismiss) {
@@ -350,9 +454,31 @@ struct AskView: View {
         }
         .buttonStyle(.plain)
         .accessibilityLabel("Close")
-        .opacity(hoveringCard ? 1 : 0)
-        .allowsHitTesting(hoveringCard)
+        .opacity(accessibleControlsEnabled || hoveringCard ? 1 : 0)
+        .allowsHitTesting(accessibleControlsEnabled || hoveringCard)
         .animation(.easeOut(duration: 0.12), value: hoveringCard)
+    }
+
+    /// Reads the answer aloud on-device. Only rendered when Settings ▸
+    /// Accessibility ▸ "Speak answer aloud" is on — otherwise this control
+    /// doesn't exist at all, matching the setting's opt-in framing. Always
+    /// visible/hit-testable (no hover-gating) once shown, same as closeButton
+    /// under accessibleControlsEnabled.
+    @ViewBuilder
+    private var speakButton: some View {
+        if settings.speakAnswerEnabled, !model.answer.isEmpty {
+            Button {
+                if model.isSpeaking { model.stopSpeaking() } else { model.speak() }
+            } label: {
+                Image(systemName: model.isSpeaking ? "stop.fill" : "speaker.wave.2")
+                    .font(.system(size: 12, weight: .medium))
+                    .foregroundStyle(.secondary)
+                    .padding(10)
+                    .contentShape(Rectangle())
+            }
+            .buttonStyle(.plain)
+            .accessibilityLabel(model.isSpeaking ? "Stop speaking" : "Speak answer aloud")
+        }
     }
 
     /// The Markdown answer with its citation superscripts tinted to the system
@@ -377,7 +503,7 @@ struct AskView: View {
                 .padding(.horizontal, 8)
                 .padding(.vertical, 3)
                 .background(.ultraThinMaterial, in: Capsule())
-                .overlay(Capsule().strokeBorder(Theme.hairline, lineWidth: 0.5))
+                .overlay(Capsule().strokeBorder(Theme.hairline(highContrast: settings.highContrastEnabled), lineWidth: 0.5))
                 .allowsHitTesting(false)
                 .transition(.opacity.combined(with: .move(edge: .trailing)))
         }

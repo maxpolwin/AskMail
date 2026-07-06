@@ -25,7 +25,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         let panel = PanelController()
         self.panel = panel
 
-        // Default Control+Option+Space (docs/defaults.md); user-configurable
+        // Default Control+Shift+Space (docs/defaults.md); user-configurable
         // via settings (FR-1 / FR-9).
         hotkey = HotkeyManager(
             keyCode: UInt32(SettingsStore.shared.hotkeyKeyCode),

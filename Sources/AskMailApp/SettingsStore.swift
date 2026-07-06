@@ -71,6 +71,18 @@ final class SettingsStore: ObservableObject {
     @Published var hotkeyKeyLabel: String {
         didSet { defaults.set(hotkeyKeyLabel, forKey: "hotkeyKeyLabel") }
     }
+    /// Settings ▸ Accessibility ▸ "Speak answer aloud". Off by default. Also
+    /// gates whether the ask panel's Close button and citation links stay
+    /// reachable without a mouse (see AskView) — opting in to speech doubles
+    /// as opting in to that broader keyboard/VoiceOver-reachable mode.
+    @Published var speakAnswerEnabled: Bool {
+        didSet { defaults.set(speakAnswerEnabled, forKey: "speakAnswerEnabled") }
+    }
+    /// Settings ▸ Accessibility ▸ "Higher-contrast panel". Off by default;
+    /// strengthens Theme.hairline in both light and dark appearance.
+    @Published var highContrastEnabled: Bool {
+        didSet { defaults.set(highContrastEnabled, forKey: "highContrastEnabled") }
+    }
 
     private init() {
         provider = ProviderChoice(rawValue: defaults.string(forKey: "provider") ?? "") ?? .ollamaLocal
@@ -97,10 +109,12 @@ final class SettingsStore: ObservableObject {
         let storedLogLevel = defaults.object(forKey: "logLevel") as? Int
         logLevel = storedLogLevel.flatMap(RollingLog.LogLevel.init(rawValue:)) ?? .debug
         let keyCode = defaults.object(forKey: "hotkeyKeyCode") as? Int
-        hotkeyKeyCode = keyCode ?? kVK_Space
+        hotkeyKeyCode = keyCode ?? ShortcutSymbols.defaultKeyCode
         let modifiers = defaults.object(forKey: "hotkeyModifiers") as? Int
-        hotkeyModifiers = modifiers ?? (controlKey | optionKey)
-        hotkeyKeyLabel = defaults.string(forKey: "hotkeyKeyLabel") ?? "Space"
+        hotkeyModifiers = modifiers ?? ShortcutSymbols.defaultModifiers
+        hotkeyKeyLabel = defaults.string(forKey: "hotkeyKeyLabel") ?? ShortcutSymbols.defaultKeyLabel
+        speakAnswerEnabled = defaults.bool(forKey: "speakAnswerEnabled")
+        highContrastEnabled = defaults.bool(forKey: "highContrastEnabled")
 
         // Migrate the pre-picker path setting: an account directory's last path
         // component is its id. (didSet doesn't fire during init, so persist here.)

@@ -1,7 +1,7 @@
 # AskMail
 
 Local-first, hotkey-triggered natural-language Q&A over a vectorized Apple
-Mail account. A global hotkey (default Control+Option+Space) opens a floating
+Mail account. A global hotkey (default Control+Shift+Space) opens a floating
 panel; questions are answered from the user's own mailbox via hybrid
 retrieval (local embeddings + FTS5, RRF-fused), with streamed answers and
 superscript citations that deep-link back to the source emails in Mail.
