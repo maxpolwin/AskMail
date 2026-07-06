@@ -147,7 +147,7 @@ struct SettingsView: View {
                 }
             }
 
-            Section("Debug") {
+            Section("Diagnostics") {
                 Picker("Log level", selection: $settings.logLevel) {
                     ForEach(RollingLog.LogLevel.allCases, id: \.self) { level in
                         Text(level.displayName).tag(level)
