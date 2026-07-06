@@ -66,9 +66,22 @@ echo "Signing DMG..."
 codesign --force --timestamp --sign "$IDENTITY" "$DMG_PATH"
 codesign --verify --verbose=2 "$DMG_PATH"
 
+# Gatekeeper checks the outer container a user actually downloads, not just
+# the .app nested inside it — the .app's own notarization ticket (from
+# notarize.sh) doesn't cover the DMG. Notarize and staple the DMG itself too.
+PROFILE="${ASKMAIL_NOTARY_PROFILE:-}"
+if [ -z "$PROFILE" ]; then
+  echo
+  echo "warning: ASKMAIL_NOTARY_PROFILE not set — skipping DMG notarization."
+  echo "Gatekeeper will show an 'unidentified developer' warning for this DMG"
+  echo "until it's notarized. Re-run with:"
+  echo "  ASKMAIL_SIGN_IDENTITY=\"$IDENTITY\" ASKMAIL_NOTARY_PROFILE=\"<profile>\" $0"
+else
+  echo "Submitting DMG to Apple's notary service (profile: $PROFILE)..."
+  xcrun notarytool submit "$DMG_PATH" --keychain-profile "$PROFILE" --wait
+  echo "Stapling notarization ticket to the DMG..."
+  xcrun stapler staple "$DMG_PATH"
+fi
+
 echo
 echo "Done: $DMG_PATH"
-echo "If $APP was notarized (Packaging/notarize.sh), the ticket travels with"
-echo "the .app inside the DMG — no separate DMG notarization needed. If you"
-echo "want the ticket stapled directly to the DMG artifact too, run:"
-echo "  xcrun stapler staple \"$DMG_PATH\""
