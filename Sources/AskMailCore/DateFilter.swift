@@ -6,14 +6,24 @@ import Foundation
 /// Recency is handled here, not by re-sorting context
 /// (docs/prompt-contract.md §3).
 ///
-/// Heuristic, most specific match wins: explicit calendar date ("2026-06-10",
-/// "10.06.2026"), "yesterday"/"today", a weekday name ("last Tuesday", bare
-/// "Tuesday" = most recent past occurrence), ordinal week-of-month ("first
-/// week of June", "2nd week of June 2026"), a trailing window ("past 4
-/// months", "the last 2 years"), explicit "<month> <year>", bare "<month>"
+/// Heuristic, most specific match wins: an open-ended range ("since June 1",
+/// "before 2026-06-01"), explicit calendar date ("2026-06-10", "10.06.2026"),
+/// "yesterday"/"today", a weekday name ("last Tuesday", bare "Tuesday" = most
+/// recent past occurrence), a day-of-month next to a month name ("June 5th",
+/// "5. Juni"), ordinal week-of-month ("first week of June"), a trailing
+/// window ("past 4 months", "the last 2 years"), explicit "<month> <year>"
+/// (one or more months, unioned if more than one is named), bare "<month>"
 /// (most recent past occurrence), or bare "<year>". A question naming more
-/// than one distinct day ("yesterday or last Tuesday") scopes to the span
-/// from the earliest to the latest rather than picking just one.
+/// than one distinct day, or more than one distinct month, scopes to the
+/// span from the earliest to the latest rather than picking just one — see
+/// the tier-1 comment inside `unixRange` for the accepted tradeoff this
+/// implies for 3+ disjoint mentions.
+///
+/// Boundary arithmetic runs in an injectable `TimeZone` (default `.current`,
+/// the device's own zone): "yesterday"/"today"/weekday/month boundaries are
+/// inherently about the user's own wall-clock day, not a fixed zone. Tests
+/// pin `timeZone: .gmt` to keep exact epoch-second assertions deterministic
+/// regardless of the machine running them.
 public enum DateFilter {
 
     private static let monthNames: [String: Int] = {
@@ -38,6 +48,7 @@ public enum DateFilter {
         "fourth": 4, "4th": 4, "vierte": 4, "vierten": 4,
     ]
     private static let lastWeekWords: Set<String> = ["last", "letzte", "letzten"]
+    private static let weekWords: Set<String> = ["week", "woche"]
 
     /// Foundation `Calendar` weekday convention: Sunday = 1 ... Saturday = 7.
     private static let weekdayNumbers: [String: Int] = {
@@ -77,6 +88,19 @@ public enum DateFilter {
         "zwoelf": 12, "zw\u{00f6}lf": 12,
     ]
 
+    /// "since"/"after" open the lower bound at the anchor date, upper bound
+    /// = now. "before"/"until" open the upper bound at the anchor date,
+    /// lower bound = epoch 0 (this app's mailbox history is always finite
+    /// and small; a store-queried floor isn't worth the coupling).
+    private static let sinceTriggerWords: Set<String> = ["since", "after", "seit"]
+    /// German "vor" is heavily overloaded (spatial, causal, and "vor 3
+    /// Tagen" = "3 days ago", a relative offset, not "before a date"). It's
+    /// safe to include here because `openEndedRange` only fires when a real
+    /// date anchor is found nearby — a bare number ("vor 3 Tagen") never
+    /// resolves as an anchor, so those phrasings simply produce no match
+    /// here rather than misfiring.
+    private static let beforeTriggerWords: Set<String> = ["before", "until", "bis", "vor"]
+
     /// True if `first` is immediately followed by `second` anywhere in `words`.
     private static func containsPhrase(_ words: [String], _ first: String, _ second: String) -> Bool {
         zip(words, words.dropFirst()).contains { $0 == first && $1 == second }
@@ -84,6 +108,35 @@ public enum DateFilter {
 
     private static func number(from word: String) -> Int? {
         Int(word) ?? numberWords[word]
+    }
+
+    /// A bare or ordinal day-of-month number: "5", "5th", "21st", "3rd", or
+    /// German "5." (the period is already stripped by the tokenizer, so "5."
+    /// arrives here as bare "5").
+    private static func dayNumber(from word: String) -> Int? {
+        if let n = Int(word), (1...31).contains(n) { return n }
+        for suffix in ["th", "st", "nd", "rd"] where word.hasSuffix(suffix) {
+            if let n = Int(word.dropLast(suffix.count)), (1...31).contains(n) { return n }
+        }
+        return nil
+    }
+
+    /// Resolves an ambiguous `A/B` slash date into (month, day). A slash date
+    /// is genuinely ambiguous between US (MM/DD) and EU/UK (DD/MM) reading
+    /// whenever both numbers could be a month (both <= 12) — rather than
+    /// silently guessing a locale, this returns nil so the match is dropped
+    /// entirely (the user can disambiguate with the dotted or ISO form,
+    /// both already unambiguous). When exactly one number can't be a month
+    /// (> 12), the reading is forced and recovered correctly either way.
+    private static func disambiguateSlashDate(_ a: Int, _ b: Int) -> (month: Int, day: Int)? {
+        let aIsMonth = (1...12).contains(a)
+        let bIsMonth = (1...12).contains(b)
+        switch (aIsMonth, bIsMonth) {
+        case (true, true): return nil                                   // ambiguous, don't guess
+        case (true, false): return (1...31).contains(b) ? (a, b) : nil  // b > 12, must be the day
+        case (false, true): return (1...31).contains(a) ? (b, a) : nil  // a > 12, must be the day
+        case (false, false): return nil                                 // neither reading valid
+        }
     }
 
     /// A trailing window ending today: "the past N <unit>s" / "the last N
@@ -124,46 +177,124 @@ public enum DateFilter {
         return Int64(start.timeIntervalSince1970)...Int64(dayAfterToday.timeIntervalSince1970 - 1)
     }
 
-    public static func unixRange(question: String, now: Date = Date()) -> ClosedRange<Int64>? {
+    /// Skips a day-number token that actually belongs to a different feature:
+    /// a relative-window count ("past 4 months ... June") or a week-of-month
+    /// ordinal ("the 1st week of June" — "1st" must not be read as day 1).
+    private static func isGuardedDayToken(at j: Int, monthIndex i: Int, words: [String]) -> Bool {
+        if j > 0 && pastTriggerWords.contains(words[j - 1]) { return true }
+        let between = j < i ? (j + 1)..<i : (i + 1)..<j
+        return between.contains { relativeUnitWords[words[$0]] != nil || weekWords.contains(words[$0]) }
+    }
+
+    /// "June 5th", "the 5th of June", "June 5", "5. Juni", "on the 5th ...
+    /// June" — a day-of-month number within 3 tokens of a month-name word,
+    /// combined with the year `resolvedYear` would give that month. Guarded
+    /// against colliding with the relative-window and week-of-month tiers
+    /// (see `isGuardedDayToken`).
+    private static func dayOfMonthMatches(words: [String], resolvedYear: (Int) -> Int?,
+                                          calendar: Calendar) -> [ClosedRange<Int64>] {
+        var results: [ClosedRange<Int64>] = []
+        let window = 3
+        for (i, word) in words.enumerated() {
+            guard let month = monthNames[word], let year = resolvedYear(month) else { continue }
+            let behind = stride(from: max(0, i - window), to: i, by: 1)
+            let ahead = stride(from: i + 1, to: min(words.count, i + window + 1), by: 1)
+            for j in Array(behind) + Array(ahead) {
+                guard !isGuardedDayToken(at: j, monthIndex: i, words: words),
+                      let day = dayNumber(from: words[j]),
+                      let start = calendar.date(from: DateComponents(year: year, month: month, day: day)) else { continue }
+                results.append(dayRange(start, calendar: calendar))
+            }
+        }
+        return results
+    }
+
+    /// The date anchor a "since"/"before" trigger word refers to: an
+    /// explicit numeric date anywhere in the question (only when there's
+    /// exactly one, to avoid guessing which one the trigger refers to),
+    /// otherwise the first resolvable form in the few tokens right after the
+    /// trigger — today/yesterday, a weekday, a month+day pair, a bare month,
+    /// or a bare year.
+    private static func openEndedAnchor(tailWords: [String], wholeQuestionNumericMatches: [ClosedRange<Int64>],
+                                        calendar: Calendar, now: Date, resolvedYear: (Int) -> Int?) -> ClosedRange<Int64>? {
+        if wholeQuestionNumericMatches.count == 1 { return wholeQuestionNumericMatches[0] }
+
+        if let first = tailWords.first {
+            if first == "today" || first == "heute" {
+                return dayRange(calendar.startOfDay(for: now), calendar: calendar)
+            }
+            if first == "yesterday" || first == "gestern",
+               let y = calendar.date(byAdding: .day, value: -1, to: calendar.startOfDay(for: now)) {
+                return dayRange(y, calendar: calendar)
+            }
+        }
+        for word in tailWords {
+            if let weekday = weekdayNumbers[word], let date = mostRecentPastWeekday(weekday, calendar: calendar, now: now) {
+                return dayRange(date, calendar: calendar)
+            }
+        }
+        for (j, word) in tailWords.enumerated() {
+            guard let month = monthNames[word], let year = resolvedYear(month) else { continue }
+            for k in tailWords.indices where k != j {
+                if let day = dayNumber(from: tailWords[k]),
+                   let start = calendar.date(from: DateComponents(year: year, month: month, day: day)) {
+                    return dayRange(start, calendar: calendar)
+                }
+            }
+            return monthRange(year: year, month: month, calendar: calendar)
+        }
+        for word in tailWords {
+            if let y = Int(word), (1990...2100).contains(y) {
+                let start = calendar.date(from: DateComponents(year: y, month: 1, day: 1))!
+                let end = calendar.date(from: DateComponents(year: y + 1, month: 1, day: 1))!
+                return Int64(start.timeIntervalSince1970)...Int64(end.timeIntervalSince1970 - 1)
+            }
+        }
+        return nil
+    }
+
+    /// "since June 1", "before 2026-06-01", "seit letzten Dienstag" — an
+    /// open-ended range anchored on a resolvable date. Runs before every
+    /// other tier so the trigger word wins outright over e.g. tier 1 reading
+    /// "June 1st" as just that one day.
+    private static func openEndedRange(words: [String], question: String, calendar: Calendar,
+                                       now: Date, resolvedYear: (Int) -> Int?) -> ClosedRange<Int64>? {
+        let numericMatches = allNumericDateRanges(question: question, calendar: calendar)
+        for (i, word) in words.enumerated() {
+            let isSince = sinceTriggerWords.contains(word)
+            let isBefore = beforeTriggerWords.contains(word)
+            guard isSince || isBefore else { continue }
+
+            let tail = Array(words[(i + 1)...].prefix(4))
+            guard let anchor = openEndedAnchor(tailWords: tail, wholeQuestionNumericMatches: numericMatches,
+                                               calendar: calendar, now: now, resolvedYear: resolvedYear) else { continue }
+
+            if isSince {
+                let todayEnd = dayRange(calendar.startOfDay(for: now), calendar: calendar).upperBound
+                return anchor.lowerBound...max(anchor.lowerBound, todayEnd)
+            } else {
+                return 0...anchor.upperBound
+            }
+        }
+        return nil
+    }
+
+    public static func unixRange(question: String, now: Date = Date(), timeZone: TimeZone = .current) -> ClosedRange<Int64>? {
         var calendar = Calendar(identifier: .gregorian)
-        calendar.timeZone = TimeZone(identifier: "UTC")!
+        calendar.timeZone = timeZone
         let nowComponents = calendar.dateComponents([.year, .month], from: now)
 
         let lowered = question.lowercased()
         let words = lowered.components(separatedBy: CharacterSet.alphanumerics.inverted)
             .filter { !$0.isEmpty }
 
-        // 1. Single-day mentions, the most specific match: explicit calendar
-        //    dates ("2026-06-10", "10.06.2026"), "yesterday"/"today", and
-        //    weekday names ("last Tuesday", bare "Tuesday" = most recent past
-        //    occurrence). A question can name more than one distinct day
-        //    ("yesterday or last Tuesday"); when it does, union the spans so
-        //    retrieval doesn't drop either day — the per-source dates already
-        //    in context (prompt-contract.md §3) let the model attribute each
-        //    email to the day the user actually meant.
-        let singleDayMatches = allNumericDateRanges(question: question, calendar: calendar)
-            + wordBasedSingleDayMatches(words: words, calendar: calendar, now: now)
-        if singleDayMatches.count > 1 {
-            let start = singleDayMatches.map(\.lowerBound).min()!
-            let end = singleDayMatches.map(\.upperBound).max()!
-            return start...end
-        }
-        if let only = singleDayMatches.first {
-            return only
-        }
-
-        // 2. Trailing relative window: "past 4 months", "the last 15 months",
-        //    "past 2 years". Spans multiple calendar years natively since it
-        //    is computed by calendar subtraction from today, not by month/year
-        //    lookup.
-        if let range = relativePastRange(words: words, calendar: calendar, now: now) {
-            return range
-        }
-
-        var month: Int? = nil
+        // Month(s)/year resolution is shared by several tiers below (day-of-
+        // month, week-of-month, month+year, and the open-ended anchor
+        // search), so it's computed once, up front.
+        var months: [Int] = []
         var year: Int? = nil
         for word in words {
-            if month == nil, let m = monthNames[word] { month = m }
+            if let m = monthNames[word], !months.contains(m) { months.append(m) }
             if year == nil, let y = Int(word), (1990...2100).contains(y) { year = y }
         }
         // "this year" / "last year" (and German equivalents) pin an explicit
@@ -191,25 +322,97 @@ public enum DateFilter {
             return month <= currentMonth ? currentYear : currentYear - 1
         }
 
+        // 0. Open-ended range: "since <date>" / "before <date>".
+        if let range = openEndedRange(words: words, question: question, calendar: calendar,
+                                      now: now, resolvedYear: resolvedYear) {
+            return range
+        }
+
+        // 1. Single-day mentions, the most specific bounded match: explicit
+        //    calendar dates ("2026-06-10", "10.06.2026"), "yesterday"/
+        //    "today", weekday names ("last Tuesday", bare "Tuesday" = most
+        //    recent past occurrence), and a day-of-month next to a month
+        //    name ("June 5th"). A question can name more than one distinct
+        //    day ("yesterday or last Tuesday"); when it does, union the
+        //    spans so retrieval doesn't drop either day — the per-source
+        //    dates already in context (prompt-contract.md §3) let the model
+        //    attribute each email to the day the user actually meant.
+        //
+        //    Accepted tradeoff: this union is a min/max bounding span, not a
+        //    disjoint set. For exactly 2 mentions that's indistinguishable
+        //    from "a continuous range" (and is in fact how "between X and Y"
+        //    resolves today, via two explicit dates unioning into the span
+        //    between them). For 3+ genuinely disjoint mentions ("June 1,
+        //    June 5, or June 10") it silently widens to cover every day in
+        //    between, not just the three named days — a coarser net than the
+        //    user asked for, but consistent with this file's existing
+        //    philosophy elsewhere (comment below, B6 step 5) that a broader
+        //    match with sources beats a false no-match. A disjoint-set
+        //    result would require a different consumer contract in
+        //    QueryService (which currently expects one ClosedRange), which
+        //    isn't justified for a single-user mailbox tool without
+        //    evidence this phrasing is common. See
+        //    testThreeDisjointDaysWidenRatherThanStayDisjoint for the pinned
+        //    current behavior.
+        let singleDayMatches = allNumericDateRanges(question: question, calendar: calendar)
+            + wordBasedSingleDayMatches(words: words, calendar: calendar, now: now)
+            + dayOfMonthMatches(words: words, resolvedYear: resolvedYear, calendar: calendar)
+        if singleDayMatches.count > 1 {
+            let start = singleDayMatches.map(\.lowerBound).min()!
+            let end = singleDayMatches.map(\.upperBound).max()!
+            return start...end
+        }
+        if let only = singleDayMatches.first {
+            return only
+        }
+        // A slash/dotted/ISO-shaped date attempt that failed to resolve
+        // (e.g. "03/04/2026", ambiguous between US and EU/UK reading) means
+        // the user was clearly trying to name one specific date, not a bare
+        // year or month -- so its leftover digits (the "2026" in that same
+        // token sequence) must not be silently picked up by tier 4/5's
+        // bare-year/month scan below. That would silently answer a
+        // different, broader question than the one the user actually asked,
+        // unlike the other fallback tiers, which only ever fire from
+        // context that was never part of a more specific, failed attempt.
+        if hasDroppedNumericDateAttempt(question: question, calendar: calendar) {
+            return nil
+        }
+
+        // 2. Trailing relative window: "past 4 months", "the last 15 months",
+        //    "past 2 years". Spans multiple calendar years natively since it
+        //    is computed by calendar subtraction from today, not by month/year
+        //    lookup.
+        if let range = relativePastRange(words: words, calendar: calendar, now: now) {
+            return range
+        }
+
         // 3. Ordinal week-of-month: "first week of June", "letzte Woche im Juni 2026".
-        if let month, let resolvedYear = resolvedYear(for: month) {
+        if let month = months.first, let resolvedYearValue = resolvedYear(for: month) {
             let hasWeekWord = words.contains("week") || words.contains("woche")
             if hasWeekWord {
                 if let last = words.first(where: lastWeekWords.contains) {
                     _ = last
-                    return lastWeekRange(year: resolvedYear, month: month, calendar: calendar)
+                    return lastWeekRange(year: resolvedYearValue, month: month, calendar: calendar)
                 }
                 if let ordinalWord = words.first(where: { ordinalWeeks[$0] != nil }),
                    let slice = ordinalWeeks[ordinalWord] {
-                    return weekSliceRange(year: resolvedYear, month: month, slice: slice, calendar: calendar)
+                    return weekSliceRange(year: resolvedYearValue, month: month, slice: slice, calendar: calendar)
                 }
             }
         }
 
-        // 4. Explicit/bare month, optionally with year.
-        if let month {
-            guard let resolvedYear = resolvedYear(for: month) else { return nil }
-            return monthRange(year: resolvedYear, month: month, calendar: calendar)
+        // 4. Explicit/bare month(s), optionally with year. More than one
+        //    distinct month ("March or April") unions their ranges, same
+        //    span-not-disjoint tradeoff as tier 1.
+        if !months.isEmpty {
+            let ranges = months.compactMap { m -> ClosedRange<Int64>? in
+                guard let y = resolvedYear(for: m) else { return nil }
+                return monthRange(year: y, month: m, calendar: calendar)
+            }
+            if ranges.count > 1 {
+                return ranges.map(\.lowerBound).min()!...ranges.map(\.upperBound).max()!
+            }
+            if let only = ranges.first { return only }
         }
 
         // 5. Bare year.
@@ -222,9 +425,27 @@ public enum DateFilter {
         return nil
     }
 
+    /// True if the question contains a numeric-date-shaped token sequence
+    /// that failed to resolve into an actual date (dropped for ambiguity or
+    /// invalidity by `allNumericDateRanges`). See the call site in
+    /// `unixRange` for why this must short-circuit the broader fallback
+    /// tiers rather than let their digits be reinterpreted more loosely.
+    private static func hasDroppedNumericDateAttempt(question: String, calendar: Calendar) -> Bool {
+        let pattern = #"(\d{4})-(\d{1,2})-(\d{1,2})|(\d{1,2})\.(\d{1,2})\.(\d{4})|(\d{1,2})/(\d{1,2})/(\d{4})"#
+        guard let regex = try? NSRegularExpression(pattern: pattern) else { return false }
+        let fullRange = NSRange(question.startIndex..., in: question)
+        let rawMatchCount = regex.numberOfMatches(in: question, range: fullRange)
+        guard rawMatchCount > 0 else { return false }
+        return allNumericDateRanges(question: question, calendar: calendar).count < rawMatchCount
+    }
+
     /// Matches every ISO (`YYYY-MM-DD`), German/EU dotted (`DD.MM.YYYY`), and
-    /// slashed (`MM/DD/YYYY`) single-date occurrence in the question (there
-    /// can be more than one, e.g. a range spelled out as two explicit dates).
+    /// unambiguous slashed (`MM/DD/YYYY` or `DD/MM/YYYY`) single-date
+    /// occurrence in the question (there can be more than one, e.g. a range
+    /// spelled out as two explicit dates). A slash date where both numbers
+    /// could be a month (both <= 12) is genuinely ambiguous between US and
+    /// EU/UK convention and is dropped rather than guessed — see
+    /// `disambiguateSlashDate`.
     private static func allNumericDateRanges(question: String, calendar: Calendar) -> [ClosedRange<Int64>] {
         let pattern = #"(\d{4})-(\d{1,2})-(\d{1,2})|(\d{1,2})\.(\d{1,2})\.(\d{4})|(\d{1,2})/(\d{1,2})/(\d{4})"#
         guard let regex = try? NSRegularExpression(pattern: pattern) else { return [] }
@@ -241,8 +462,9 @@ public enum DateFilter {
                 (year, month, day) = (y, m, d)               // YYYY-MM-DD
             } else if let d = int(4), let m = int(5), let y = int(6) {
                 (year, month, day) = (y, m, d)               // DD.MM.YYYY
-            } else if let m = int(7), let d = int(8), let y = int(9) {
-                (year, month, day) = (y, m, d)               // MM/DD/YYYY
+            } else if let a = int(7), let b = int(8), let y = int(9) {
+                guard let resolved = disambiguateSlashDate(a, b) else { return nil }
+                (year, month, day) = (y, resolved.month, resolved.day)
             } else {
                 return nil
             }

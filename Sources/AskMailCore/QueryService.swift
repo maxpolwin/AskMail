@@ -148,6 +148,10 @@ public final class QueryService: @unchecked Sendable {
         let fused = Fusion.reciprocalRankFusion([vectorIDs, keywordIDs])
         let aboveFloor = fused.filter { $0.score > settings.relevanceFloor }
         log("retrieval vector=\(vectorIDs.count) keyword=\(keywordIDs.count) fused=\(fused.count) aboveFloor=\(aboveFloor.count) top=\(aboveFloor.prefix(3).map { "\($0.id):\(String(format: "%.4f", $0.score))" }.joined(separator: ","))", .debug)
+        // Rollup only, not a per-item dump: enumerating every dropped chunk's
+        // identity would require an extra store round trip for information
+        // that's rarely needed, and would bloat RollingLog's bounded buffer.
+        log("retrieval droppedByFloor=\(fused.count - aboveFloor.count) floor=\(settings.relevanceFloor)", .debug)
 
         let scoreForID = Dictionary(uniqueKeysWithValues: aboveFloor.map { ($0.id, $0.score) })
         var candidates = try store.chunks(ids: aboveFloor.map(\.id))
@@ -165,16 +169,44 @@ public final class QueryService: @unchecked Sendable {
         // bypassing relevance ranking. If nothing at all falls in range,
         // keep the unfiltered candidates: a wrong-date answer with sources
         // beats a false no-match.
+        var dateFilterActive = false
+        var directOnlyIDs: Set<Int64> = []
+        var semanticAndDateIDs: Set<Int64> = []
         if let range = DateFilter.unixRange(question: question) {
+            dateFilterActive = true
             let scopedFromSemantic = candidates.filter { range.contains($0.dateUnix) }
             let direct = try store.chunks(dateRange: range, limit: settings.topK)
             let alreadyIncluded = Set(scopedFromSemantic.map(\.chunkID))
-            let merged = scopedFromSemantic + direct.filter { !alreadyIncluded.contains($0.chunkID) }
+            let directOnly = direct.filter { !alreadyIncluded.contains($0.chunkID) }
+            let merged = scopedFromSemantic + directOnly
             log("retrieval dateFilter=\(range) semanticMatch=\(scopedFromSemantic.count) direct=\(direct.count) merged=\(merged.count)/\(candidates.count)", .debug)
-            if !merged.isEmpty { candidates = merged }
+            if !merged.isEmpty {
+                candidates = merged
+                directOnlyIDs = Set(directOnly.map(\.chunkID))
+                semanticAndDateIDs = alreadyIncluded
+            }
         }
 
-        return Array(candidates.prefix(settings.topK))
+        // Per-candidate identity for post-hoc diagnosis: which emails
+        // actually reached the LLM, why (semantic ranking, the direct date
+        // lookup, or both), and their score — without this, reconstructing
+        // "why was email X cited but not Y" from an exported log requires
+        // manually joining chunk IDs against the database. Bounded by
+        // settings.topK (a small user-controlled setting), so this cannot
+        // become an unbounded dump the way logging every candidate would.
+        let finalCandidates = Array(candidates.prefix(settings.topK))
+        for (index, chunk) in finalCandidates.enumerated() {
+            let via: String
+            if directOnlyIDs.contains(chunk.chunkID) {
+                via = "date"
+            } else if dateFilterActive && semanticAndDateIDs.contains(chunk.chunkID) {
+                via = "semantic+date"
+            } else {
+                via = "semantic"
+            }
+            log("retrieval final[\(index + 1)] chunk=\(chunk.chunkID) subject=\"\(chunk.subject)\" from=\(chunk.sender) date=\(PromptAssembler.ymd(chunk.dateUnix)) score=\(String(format: "%.4f", chunk.score)) via=\(via)", .debug)
+        }
+        return finalCandidates
     }
 
     // MARK: Provider wiring (FR-4)

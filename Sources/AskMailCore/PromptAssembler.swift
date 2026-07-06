@@ -105,15 +105,18 @@ public struct PromptAssembler: Sendable {
 
     // MARK: Date rendering
 
-    private static let ymdFormatter: DateFormatter = {
+    /// Renders in the given time zone (default the device's own, matching
+    /// DateFilter's day/week/month boundaries) so a source's displayed date
+    /// agrees with the day the user would call "today"/"yesterday" when
+    /// asking about it. Built fresh per call rather than cached, since the
+    /// zone can vary between calls (production default vs. a fixed zone in
+    /// tests); DateFormatter construction is cheap at this call frequency
+    /// (once per rendered source, not per token).
+    public static func ymd(_ unix: Int64, timeZone: TimeZone = .current) -> String {
         let formatter = DateFormatter()
         formatter.locale = Locale(identifier: "en_US_POSIX")
-        formatter.timeZone = TimeZone(identifier: "UTC")
+        formatter.timeZone = timeZone
         formatter.dateFormat = "yyyy-MM-dd"
-        return formatter
-    }()
-
-    public static func ymd(_ unix: Int64) -> String {
-        ymdFormatter.string(from: Date(timeIntervalSince1970: TimeInterval(unix)))
+        return formatter.string(from: Date(timeIntervalSince1970: TimeInterval(unix)))
     }
 }

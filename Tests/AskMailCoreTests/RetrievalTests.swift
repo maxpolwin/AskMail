@@ -129,7 +129,7 @@ final class DateFilterTests: XCTestCase {
 
     func testExplicitMonthAndYear() {
         let range = DateFilter.unixRange(question: "What was the February 2026 newsletter highlight?",
-                                         now: reference)
+                                         now: reference, timeZone: .gmt)
         XCTAssertNotNil(range)
         XCTAssertTrue(range!.contains(1_770_291_000))   // 2026-02-05
         XCTAssertFalse(range!.contains(1_772_439_240))  // 2026-03-02
@@ -137,50 +137,50 @@ final class DateFilterTests: XCTestCase {
 
     func testGermanMonthName() {
         let range = DateFilter.unixRange(question: "Was war das Highlight im Februar 2026?",
-                                         now: reference)
+                                         now: reference, timeZone: .gmt)
         XCTAssertNotNil(range)
         XCTAssertTrue(range!.contains(1_770_291_000))
     }
 
     func testBareMonthResolvesToMostRecentPast() {
         // Asking in May 2026 about "February" means February 2026.
-        let range = DateFilter.unixRange(question: "the February newsletter", now: reference)
+        let range = DateFilter.unixRange(question: "the February newsletter", now: reference, timeZone: .gmt)
         XCTAssertNotNil(range)
         XCTAssertTrue(range!.contains(1_770_291_000))
         // Asking about "December" means December 2025.
-        let december = DateFilter.unixRange(question: "the December summary", now: reference)
+        let december = DateFilter.unixRange(question: "the December summary", now: reference, timeZone: .gmt)
         XCTAssertNotNil(december)
         XCTAssertTrue(december!.contains(1_765_000_000))  // 2025-12-06
     }
 
     func testNoDateMention() {
         XCTAssertNil(DateFilter.unixRange(question: "What did the vendor say about pricing?",
-                                          now: reference))
+                                          now: reference, timeZone: .gmt))
     }
 
     func testISODate() {
         let range = DateFilter.unixRange(question: "what emails did i get during on 2026-06-10?",
-                                         now: reference)
+                                         now: reference, timeZone: .gmt)
         XCTAssertNotNil(range)
         XCTAssertEqual(range, 1_781_049_600...1_781_136_000 - 1)
     }
 
     func testDottedGermanDate() {
-        let range = DateFilter.unixRange(question: "was bekam ich am 10.06.2026?", now: reference)
+        let range = DateFilter.unixRange(question: "was bekam ich am 10.06.2026?", now: reference, timeZone: .gmt)
         XCTAssertNotNil(range)
         XCTAssertEqual(range, 1_781_049_600...1_781_136_000 - 1)
     }
 
     func testFirstWeekOfMonth() {
         let range = DateFilter.unixRange(question: "what emails did i get during the first week of June this year?",
-                                         now: reference)
+                                         now: reference, timeZone: .gmt)
         XCTAssertNotNil(range)
         XCTAssertEqual(range, 1_780_272_000...1_780_876_800 - 1)  // June 1 - June 7 (exclusive end)
     }
 
     func testLastWeekOfMonth() {
         let range = DateFilter.unixRange(question: "what did I get the last week of June 2026?",
-                                         now: reference)
+                                         now: reference, timeZone: .gmt)
         XCTAssertNotNil(range)
         XCTAssertEqual(range, 1_782_259_200...1_782_864_000 - 1)  // June 24 - June 30 (exclusive end)
     }
@@ -189,7 +189,7 @@ final class DateFilterTests: XCTestCase {
     // bare-month heuristic alone would already say "March 2026". "last year"
     // must override that to March 2025.
     func testMonthWithExplicitLastYear() {
-        let range = DateFilter.unixRange(question: "the March newsletter last year", now: reference)
+        let range = DateFilter.unixRange(question: "the March newsletter last year", now: reference, timeZone: .gmt)
         XCTAssertNotNil(range)
         XCTAssertTrue(range!.contains(1_741_996_800))   // 2025-03-15
         XCTAssertFalse(range!.contains(1_773_532_800))  // 2026-03-15
@@ -198,28 +198,28 @@ final class DateFilterTests: XCTestCase {
     // December hasn't happened yet this year: the bare-month heuristic alone
     // would say "December 2025". "this year" must override that to December 2026.
     func testMonthWithExplicitThisYear() {
-        let range = DateFilter.unixRange(question: "the December summary this year", now: reference)
+        let range = DateFilter.unixRange(question: "the December summary this year", now: reference, timeZone: .gmt)
         XCTAssertNotNil(range)
         XCTAssertTrue(range!.contains(1_797_292_800))   // 2026-12-15
         XCTAssertFalse(range!.contains(1_765_756_800))  // 2025-12-15
     }
 
     func testBareThisYear() {
-        let range = DateFilter.unixRange(question: "what emails did I get this year?", now: reference)
+        let range = DateFilter.unixRange(question: "what emails did I get this year?", now: reference, timeZone: .gmt)
         XCTAssertNotNil(range)
         XCTAssertTrue(range!.contains(1_767_225_600))    // 2026-01-01
         XCTAssertFalse(range!.contains(1_735_689_600))   // 2025-01-01
     }
 
     func testBareLastYear() {
-        let range = DateFilter.unixRange(question: "what emails did I get last year?", now: reference)
+        let range = DateFilter.unixRange(question: "what emails did I get last year?", now: reference, timeZone: .gmt)
         XCTAssertNotNil(range)
         XCTAssertTrue(range!.contains(1_735_689_600))    // 2025-01-01
         XCTAssertFalse(range!.contains(1_767_225_600))   // 2026-01-01
     }
 
     func testGermanLastYearPhrase() {
-        let range = DateFilter.unixRange(question: "was bekam ich im letzten Jahr?", now: reference)
+        let range = DateFilter.unixRange(question: "was bekam ich im letzten Jahr?", now: reference, timeZone: .gmt)
         XCTAssertNotNil(range)
         XCTAssertTrue(range!.contains(1_735_689_600))    // 2025-01-01
     }
@@ -227,7 +227,7 @@ final class DateFilterTests: XCTestCase {
     // Reference is 2026-05-28.
     func testPastFourMonths() {
         let range = DateFilter.unixRange(question: "what did I get over the past four months?",
-                                         now: reference)
+                                         now: reference, timeZone: .gmt)
         XCTAssertNotNil(range)
         XCTAssertTrue(range!.contains(1_773_532_800))    // 2026-03-15, inside the window
         XCTAssertFalse(range!.contains(1_761_955_200))   // 2025-11-01, before it
@@ -235,7 +235,7 @@ final class DateFilterTests: XCTestCase {
 
     func testPast15Months() {
         let range = DateFilter.unixRange(question: "what did I get in the past 15 months?",
-                                         now: reference)
+                                         now: reference, timeZone: .gmt)
         XCTAssertNotNil(range)
         XCTAssertTrue(range!.contains(1_752_537_600))    // 2025-07-15, inside the window
         XCTAssertFalse(range!.contains(1_725_148_800))   // 2024-09-01, before it
@@ -245,7 +245,7 @@ final class DateFilterTests: XCTestCase {
     // scope to a single year.
     func testPastTwoYears() {
         let range = DateFilter.unixRange(question: "what emails came in over the past 2 years?",
-                                         now: reference)
+                                         now: reference, timeZone: .gmt)
         XCTAssertNotNil(range)
         XCTAssertTrue(range!.contains(1_719_792_000))    // 2024-07-01
         XCTAssertTrue(range!.contains(1_751_328_000))    // 2025-07-01
@@ -254,7 +254,7 @@ final class DateFilterTests: XCTestCase {
 
     func testLastNMonthsAlsoWorks() {
         // "last" (not just "past") is accepted when a count is present.
-        let range = DateFilter.unixRange(question: "the last 3 months", now: reference)
+        let range = DateFilter.unixRange(question: "the last 3 months", now: reference, timeZone: .gmt)
         XCTAssertNotNil(range)
         XCTAssertTrue(range!.contains(1_773_532_800))    // 2026-03-15
     }
@@ -263,26 +263,26 @@ final class DateFilterTests: XCTestCase {
         // Regression guard: adding "past N units" parsing must not change the
         // already-shipped meaning of bare "last year" (the previous calendar
         // year), which is a distinct feature from a rolling 12-month window.
-        let range = DateFilter.unixRange(question: "what emails did I get last year?", now: reference)
+        let range = DateFilter.unixRange(question: "what emails did I get last year?", now: reference, timeZone: .gmt)
         XCTAssertNotNil(range)
         XCTAssertTrue(range!.contains(1_735_689_600))    // 2025-01-01, would be excluded by a rolling window
     }
 
     // Reference is 2026-05-28, a Thursday.
     func testYesterday() {
-        let range = DateFilter.unixRange(question: "what emails did I get yesterday?", now: reference)
+        let range = DateFilter.unixRange(question: "what emails did I get yesterday?", now: reference, timeZone: .gmt)
         XCTAssertNotNil(range)
         XCTAssertEqual(range, 1_779_840_000...1_779_926_400 - 1)  // 2026-05-27
     }
 
     func testLastWeekday() {
-        let range = DateFilter.unixRange(question: "what did I get last Tuesday?", now: reference)
+        let range = DateFilter.unixRange(question: "what did I get last Tuesday?", now: reference, timeZone: .gmt)
         XCTAssertNotNil(range)
         XCTAssertEqual(range, 1_779_753_600...1_779_840_000 - 1)  // 2026-05-26
     }
 
     func testBareWeekdayMeansMostRecentPastOccurrence() {
-        let range = DateFilter.unixRange(question: "anything from Tuesday?", now: reference)
+        let range = DateFilter.unixRange(question: "anything from Tuesday?", now: reference, timeZone: .gmt)
         XCTAssertNotNil(range)
         XCTAssertEqual(range, 1_779_753_600...1_779_840_000 - 1)  // 2026-05-26
     }
@@ -291,11 +291,188 @@ final class DateFilterTests: XCTestCase {
     // scope to their combined span, not silently pick (or hallucinate) one.
     func testMultipleDistinctDaysUnionTheirSpan() {
         let range = DateFilter.unixRange(question: "emails i got yesterday? or last tuesday?",
-                                         now: reference)
+                                         now: reference, timeZone: .gmt)
         XCTAssertNotNil(range)
         XCTAssertTrue(range!.contains(1_779_753_600))     // last Tuesday 2026-05-26
         XCTAssertTrue(range!.contains(1_779_840_000))     // yesterday 2026-05-27
         XCTAssertFalse(range!.contains(1_779_667_200))    // Monday 2026-05-25, outside both
         XCTAssertFalse(range!.contains(1_779_926_400))    // today 2026-05-28, outside both
+    }
+
+    // MARK: Time zone injection
+
+    func testTodayUsesInjectedTimeZoneNotHardcodedUTC() {
+        // 2026-05-29T02:00:00Z has already rolled to the next UTC day, but
+        // is still 2026-05-28 evening in US Pacific time (PDT, UTC-7) --
+        // proving the day boundary follows the injected zone, not a
+        // hardcoded UTC assumption.
+        let crossedMidnightUTC = Date(timeIntervalSince1970: 1_780_020_000)
+        let pacific = TimeZone(identifier: "America/Los_Angeles")!
+
+        let utcRange = DateFilter.unixRange(question: "what did I get today?", now: crossedMidnightUTC, timeZone: .gmt)
+        XCTAssertEqual(utcRange, 1_780_012_800...1_780_099_200 - 1)  // UTC day: 2026-05-29
+
+        let pacificRange = DateFilter.unixRange(question: "what did I get today?", now: crossedMidnightUTC, timeZone: pacific)
+        XCTAssertEqual(pacificRange, 1_779_951_600...1_780_038_000 - 1)  // Pacific day: 2026-05-28
+    }
+
+    func testDefaultTimeZoneIsCurrentNotHardcodedUTC() {
+        // Omitting timeZone must follow the device's own zone (the
+        // production default), matching an explicit .current, not silently
+        // falling back to UTC.
+        let implicit = DateFilter.unixRange(question: "what did I get today?", now: reference)
+        let explicit = DateFilter.unixRange(question: "what did I get today?", now: reference, timeZone: .current)
+        XCTAssertEqual(implicit, explicit)
+    }
+
+    // MARK: Ambiguous numeric date formats
+
+    func testSlashDateUnambiguousDayFirstResolves() {
+        // 13 can't be a month, so "13/05/2026" is unambiguously 13 May 2026
+        // even though it arrives via the MM/DD-shaped slash pattern.
+        let range = DateFilter.unixRange(question: "what did I get on 13/05/2026?", now: reference, timeZone: .gmt)
+        XCTAssertEqual(range, 1_778_630_400...1_778_716_800 - 1)
+    }
+
+    func testAmbiguousSlashDateDoesNotGuessLocale() {
+        // Both 03 and 04 could be a month: genuinely ambiguous between US
+        // (March 4) and EU/UK (April 3) readings. Must not silently pick one.
+        XCTAssertNil(DateFilter.unixRange(question: "what did I get on 03/04/2026?", now: reference, timeZone: .gmt))
+    }
+
+    func testAmbiguousSlashDateSwappedAlsoDoesNotGuess() {
+        // Same ambiguity, operands swapped -- confirms no directional bias.
+        XCTAssertNil(DateFilter.unixRange(question: "what did I get on 04/03/2026?", now: reference, timeZone: .gmt))
+    }
+
+    // MARK: Day-of-month next to a month name
+
+    func testDayOfMonthWithOrdinalSuffix() {
+        let range = DateFilter.unixRange(question: "what emails did I get on June 5th this year?",
+                                         now: reference, timeZone: .gmt)
+        XCTAssertEqual(range, 1_780_617_600...1_780_704_000 - 1)  // 2026-06-05
+    }
+
+    func testDayOfMonthGermanDottedOrdinal() {
+        // Bare month: June(6) > current month(5) at the reference, so the
+        // most-recent-past-occurrence heuristic resolves to 2025.
+        let range = DateFilter.unixRange(question: "was bekam ich am 5. Juni?", now: reference, timeZone: .gmt)
+        XCTAssertEqual(range, 1_749_081_600...1_749_168_000 - 1)  // 2025-06-05
+    }
+
+    func testDayOfMonthSeparatedFromMonthWord() {
+        // "5th" and "june" are 2 tokens apart ("of" between them), within
+        // the day-of-month scan's window but not directly adjacent.
+        let range = DateFilter.unixRange(question: "the 5th of June, did I get anything?",
+                                         now: reference, timeZone: .gmt)
+        XCTAssertEqual(range, 1_749_081_600...1_749_168_000 - 1)  // 2025-06-05, same bare-month year rollback
+    }
+
+    func testDayOfMonthDoesNotHijackWeekOfMonth() {
+        // Regression guard: "1st" is both a valid ordinal-week word and a
+        // valid bare day number. Once day-of-month matching runs ahead of
+        // the week-of-month tier, "1st" adjacent to "june" must still
+        // resolve to the whole first week, not day 1 alone.
+        let range = DateFilter.unixRange(question: "the 1st week of June 2026", now: reference, timeZone: .gmt)
+        XCTAssertEqual(range, 1_780_272_000...1_780_876_800 - 1)  // June 1 - June 7, not just June 1
+    }
+
+    // MARK: Month+year tier union
+
+    func testMonthUnionAcrossTwoMentions() {
+        // "March or April" -- today only March was returned and April
+        // silently dropped; both must now be covered.
+        let range = DateFilter.unixRange(question: "did I get anything in March or April?",
+                                         now: reference, timeZone: .gmt)
+        XCTAssertEqual(range, 1_772_323_200...1_777_593_600 - 1)  // March 1 - April 30, 2026
+    }
+
+    func testMonthUnionWithLastYearOverride() {
+        let range = DateFilter.unixRange(question: "emails from November or December last year",
+                                         now: reference, timeZone: .gmt)
+        XCTAssertEqual(range, 1_761_955_200...1_767_225_600 - 1)  // Nov 1 - Dec 31, 2025
+    }
+
+    // MARK: Open-ended ranges
+
+    func testSinceExplicitDate() {
+        let range = DateFilter.unixRange(question: "emails since 2026-05-01", now: reference, timeZone: .gmt)
+        XCTAssertNotNil(range)
+        XCTAssertEqual(range?.lowerBound, 1_777_593_600)   // 2026-05-01 start
+        XCTAssertEqual(range?.upperBound, 1_780_012_799)   // end of the reference's own day
+    }
+
+    func testBeforeExplicitDate() {
+        let range = DateFilter.unixRange(question: "everything before 2026-06-01", now: reference, timeZone: .gmt)
+        XCTAssertNotNil(range)
+        XCTAssertEqual(range?.lowerBound, 0)
+        XCTAssertEqual(range?.upperBound, 1_780_358_400 - 1)  // up through the end of 2026-06-01
+    }
+
+    func testGermanSeitYesterday() {
+        let range = DateFilter.unixRange(question: "was bekam ich seit gestern?", now: reference, timeZone: .gmt)
+        XCTAssertNotNil(range)
+        XCTAssertEqual(range?.lowerBound, 1_779_840_000)   // 2026-05-27 (yesterday) start
+        XCTAssertEqual(range?.upperBound, 1_780_012_799)   // end of the reference's own day
+    }
+
+    func testGermanVorWithRelativeOffsetDoesNotMisfire() {
+        // "vor 3 Tagen" ("3 days ago") is a relative offset, not "before a
+        // date" -- deliberately out of scope (see the doc comment on
+        // beforeTriggerWords). A bare number never resolves as an anchor,
+        // so this must safely produce no match rather than misfire.
+        XCTAssertNil(DateFilter.unixRange(question: "vor 3 Tagen", now: reference, timeZone: .gmt))
+    }
+
+    func testGermanVorNonTemporalUsageDoesNotMisfire() {
+        // "vor" used in its ordinary non-temporal sense, with no resolvable
+        // date anywhere in the question, must not spuriously trigger.
+        XCTAssertNil(DateFilter.unixRange(question: "Ich habe Angst vor Spinnen", now: reference, timeZone: .gmt))
+    }
+
+    // MARK: Accepted tradeoff -- 3+ disjoint day mentions widen, not disjoint
+
+    func testThreeDisjointDaysWidenRatherThanStayDisjoint() {
+        // Documented tradeoff (see unixRange's tier-1 comment): 3+ disjoint
+        // single-day mentions widen to a bounding span rather than staying a
+        // disjoint set, so days never asked about (June 2-4, 6-9) get
+        // silently included too. Pinned here so a future refactor doesn't
+        // change this in a worse direction without noticing.
+        let range = DateFilter.unixRange(question: "emails on 2026-06-01, 2026-06-05, or 2026-06-10",
+                                         now: reference, timeZone: .gmt)
+        XCTAssertEqual(range, 1_780_272_000...1_781_136_000 - 1)  // June 1 00:00 - June 10 23:59:59
+        XCTAssertTrue(range!.contains(1_780_617_600))   // June 5, one of the 3 asked-about days
+        XCTAssertTrue(range!.contains(1_780_704_000))   // June 6, NOT asked about but included anyway
+    }
+
+    // MARK: Calendar arithmetic edge cases
+
+    func testPastMonthsClampsAtMonthEndInsteadOfRollingOver() {
+        let dayThirtyOneNow = Date(timeIntervalSince1970: 1_774_958_400)  // 2026-03-31T12:00:00Z
+        let range = DateFilter.unixRange(question: "what did I get in the past month?", now: dayThirtyOneNow, timeZone: .gmt)
+        XCTAssertNotNil(range)
+        XCTAssertEqual(range!.lowerBound, 1_772_236_800)  // 2026-02-28, clamped down, not rolled to Mar 3
+    }
+
+    func testPastYearFromLeapDayClampsToFeb28NotMarch1() {
+        let leapDayNow = Date(timeIntervalSince1970: 1_835_431_200)  // 2028-02-29T10:00:00Z
+        let range = DateFilter.unixRange(question: "what did I get in the past 12 months?", now: leapDayNow, timeZone: .gmt)
+        XCTAssertNotNil(range)
+        XCTAssertEqual(range!.lowerBound, 1_803_772_800)  // 2027-02-28, clamped down, not rolled to Mar 1
+    }
+
+    func testLastTuesdayCrossesYearBoundary() {
+        let newYearsDay = Date(timeIntervalSince1970: 1_767_225_600)  // 2026-01-01T00:00:00Z, a Thursday
+        let range = DateFilter.unixRange(question: "what did I get last Tuesday?", now: newYearsDay, timeZone: .gmt)
+        XCTAssertEqual(range, 1_767_052_800...1_767_139_200 - 1)  // 2025-12-30, crossing month AND year
+    }
+
+    func testBareMonthEqualsCurrentMonthResolvesToThisYear() {
+        // reference is 2026-05-28: naming "May" while May is the current,
+        // in-progress month must resolve to May 2026, not May 2025 -- the
+        // `month <= currentMonth` boundary at exact equality.
+        let range = DateFilter.unixRange(question: "the May newsletter", now: reference, timeZone: .gmt)
+        XCTAssertNotNil(range)
+        XCTAssertTrue(range!.contains(1_780_000_000))  // the reference instant itself falls within May 2026
     }
 }

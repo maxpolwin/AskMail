@@ -140,4 +140,89 @@ final class QueryServiceTests: XCTestCase {
         XCTAssertTrue(chunks.contains { $0.messageID == "target@x" },
                      "date-scoped retrieval must surface the target email even though it doesn't rank in the semantic top-N")
     }
+
+    // MARK: Per-candidate debug logging (retrieval final[...] / droppedByFloor)
+
+    func testLoggingTagsSemanticOnlyCandidatesInRankOrder() async throws {
+        let store = try SQLiteStore.inMemory()
+        let embedder = StubEmbedder()
+
+        let pk1 = try store.upsertMessage(messageID: "a@x", account: "acc", subject: "Invoice",
+                                          sender: "billing@x", dateUnix: 1)
+        let text1 = "invoice payment due webinar pricing"
+        try store.replaceChunks(messagePk: pk1, chunks: [(.body, text1, try await embedder.embed([text1])[0])])
+
+        let pk2 = try store.upsertMessage(messageID: "b@x", account: "acc", subject: "Webinar",
+                                          sender: "events@x", dateUnix: 2)
+        let text2 = "webinar pricing"
+        try store.replaceChunks(messagePk: pk2, chunks: [(.body, text2, try await embedder.embed([text2])[0])])
+
+        var logged: [String] = []
+        let lock = NSLock()
+        let service = QueryService(store: store, embedder: embedder, log: { line, _ in
+            lock.lock(); logged.append(line); lock.unlock()
+        })
+        _ = try await service.retrieve(question: "invoice payment due webinar pricing", settings: QuerySettings())
+
+        let finalLines = logged.filter { $0.hasPrefix("retrieval final[") }
+        XCTAssertEqual(finalLines.count, 2)
+        XCTAssertTrue(finalLines[0].hasPrefix("retrieval final[1]"), finalLines[0])
+        XCTAssertTrue(finalLines[0].contains("subject=\"Invoice\""), finalLines[0])
+        XCTAssertTrue(finalLines[0].contains("via=semantic"), finalLines[0])
+        XCTAssertTrue(finalLines[1].hasPrefix("retrieval final[2]"), finalLines[1])
+        XCTAssertTrue(finalLines[1].contains("via=semantic"), finalLines[1])
+    }
+
+    func testLoggingTagsDirectDateOnlyCandidates() async throws {
+        let store = try SQLiteStore.inMemory()
+        let embedder = StubEmbedder()
+
+        for i in 0..<40 {
+            let pk = try store.upsertMessage(messageID: "decoy\(i)@x", account: "acc",
+                                             subject: "S", sender: "s", dateUnix: 1)
+            let text = "emails emails did get during on emails decoy number \(i)"
+            try store.replaceChunks(messagePk: pk, chunks: [(.body, text, try await embedder.embed([text])[0])])
+        }
+        for i in 0..<3 {
+            let pk = try store.upsertMessage(messageID: "target\(i)@x", account: "acc",
+                                             subject: "Dentist\(i)", sender: "clinic\(i)@x",
+                                             dateUnix: 1_781_100_000 + Int64(i) * 60)  // 2026-06-10
+            let text = "your appointment number \(i) is confirmed"
+            try store.replaceChunks(messagePk: pk, chunks: [(.body, text, try await embedder.embed([text])[0])])
+        }
+
+        var logged: [String] = []
+        let lock = NSLock()
+        let service = QueryService(store: store, embedder: embedder, log: { line, _ in
+            lock.lock(); logged.append(line); lock.unlock()
+        })
+        _ = try await service.retrieve(question: "what emails did i get during on 2026-06-10?", settings: QuerySettings())
+
+        let finalLines = logged.filter { $0.hasPrefix("retrieval final[") }
+        XCTAssertEqual(finalLines.count, 3)
+        XCTAssertTrue(finalLines.allSatisfy { $0.contains("via=date") })
+        XCTAssertTrue(logged.contains { $0.contains("direct=3") && $0.contains("merged=3/") })
+    }
+
+    func testLoggingDroppedByFloorRollupWhenNothingSurvives() async throws {
+        let store = try SQLiteStore.inMemory()
+        let embedder = StubEmbedder()
+        let pk = try store.upsertMessage(messageID: "a@x", account: "acc", subject: "Invoice",
+                                         sender: "billing@x", dateUnix: 1)
+        let text = "invoice payment webinar pricing"
+        try store.replaceChunks(messagePk: pk, chunks: [(.body, text, try await embedder.embed([text])[0])])
+
+        var logged: [String] = []
+        let lock = NSLock()
+        let service = QueryService(store: store, embedder: embedder, log: { line, _ in
+            lock.lock(); logged.append(line); lock.unlock()
+        })
+        var settings = QuerySettings()
+        settings.relevanceFloor = 2.0  // above any possible RRF score, so everything is dropped
+        let chunks = try await service.retrieve(question: "invoice payment webinar pricing", settings: settings)
+
+        XCTAssertTrue(chunks.isEmpty)
+        XCTAssertTrue(logged.contains { $0.hasPrefix("retrieval droppedByFloor=1 ") }, logged.joined(separator: "\n"))
+        XCTAssertFalse(logged.contains { $0.hasPrefix("retrieval final[") })
+    }
 }
