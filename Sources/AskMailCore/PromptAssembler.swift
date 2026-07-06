@@ -54,7 +54,8 @@ public struct PromptAssembler: Sendable {
                                               sender: chunk.sender,
                                               originalSender: chunk.originalSender,
                                               dateUnix: chunk.dateUnix,
-                                              relevance: chunk.score > 0 ? chunk.score : nil)
+                                              relevance: chunk.score > 0 ? chunk.score : nil,
+                                              excerpt: chunk.text)
             nextNumber += 1
         }
 

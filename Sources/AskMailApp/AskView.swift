@@ -16,6 +16,17 @@ func formatSource(_ number: Int, _ ref: SourceRef) -> String {
     "\(number)  \(sourceBody(ref))"
 }
 
+/// `ref.excerpt` collapsed to one line (chunk text can span paragraphs) and
+/// quoted, so the clipboard's source list stays one line per source while
+/// still carrying the exact text the model was shown.
+func quotedExcerpt(_ ref: SourceRef) -> String? {
+    let flattened = ref.excerpt
+        .components(separatedBy: .whitespacesAndNewlines)
+        .filter { !$0.isEmpty }
+        .joined(separator: " ")
+    return flattened.isEmpty ? nil : "\"\(flattened)\""
+}
+
 /// The model answers in Markdown (`**bold**`, `*italic*`, `` `code` ``). Parse
 /// it inline-only so emphasis renders while newlines are preserved verbatim —
 /// block reflow would fight the streamed, line-oriented answer.
@@ -39,9 +50,11 @@ func relevancePercents(_ sources: [(number: Int, ref: SourceRef)]) -> [Int: Int]
 }
 
 /// One source: the accent-coloured, clickable, selectable line and a relevance
-/// bar. Hovering the row (or the bar) reveals the exact figure within 250 ms —
-/// faster than the system tooltip, which `.help()` can't speed up — worded
-/// plainly as "Relevance score: NN%".
+/// bar. Hovering the label (domain/date/subject) shows the exact chunk text
+/// the model was shown, via the system tooltip. Hovering the bar reveals the
+/// relevance figure within 250 ms — faster than the system tooltip, which
+/// `.help()` can't speed up — worded plainly as "Relevance score: NN%". The
+/// two hover targets are independent so they never fight over the same spot.
 private struct SourceRow: View {
     let number: Int
     let ref: SourceRef
@@ -52,7 +65,7 @@ private struct SourceRow: View {
     /// can open.
     let accessibleLinks: Bool
     let highContrast: Bool
-    @State private var hovering = false
+    @State private var hoveringBar = false
     @State private var showScore = false
     /// Routes through the same H-14 gate as every other link sink (set by
     /// AskView's `.environment(\.openURL, ...)`), even though a citation URL
@@ -62,35 +75,36 @@ private struct SourceRow: View {
     var body: some View {
         HStack(spacing: 8) {
             rowLabel
+                .help(ref.excerpt)
             Spacer(minLength: 8)
             if let percent {
                 RelevanceBar(fraction: Double(percent) / 100, highContrast: highContrast)
-            }
-        }
-        .contentShape(Rectangle())  // whole row (incl. gaps) is the hover target
-        .overlay(alignment: .trailing) {
-            if showScore, let percent {
-                Text("Relevance score: \(percent)%")
-                    .font(.caption.weight(.medium))
-                    .foregroundStyle(Theme.accent)
-                    .padding(.horizontal, 8)
-                    .padding(.vertical, 3)
-                    .background(.ultraThinMaterial, in: Capsule())
-                    .overlay(Capsule().strokeBorder(Theme.hairline(highContrast: highContrast), lineWidth: 0.5))
-                    .allowsHitTesting(false)
-                    .transition(.opacity)
-            }
-        }
-        .onHover { inside in
-            hovering = inside
-            if inside {
-                // Reveal after a quarter second of sustained hover.
-                Task { @MainActor in
-                    try? await Task.sleep(nanoseconds: 250_000_000)
-                    if hovering { withAnimation(.easeOut(duration: 0.1)) { showScore = true } }
-                }
-            } else {
-                withAnimation(.easeOut(duration: 0.1)) { showScore = false }
+                    .contentShape(Rectangle())  // hover target is the bar only
+                    .overlay(alignment: .trailing) {
+                        if showScore {
+                            Text("Relevance score: \(percent)%")
+                                .font(.caption.weight(.medium))
+                                .foregroundStyle(Theme.accent)
+                                .padding(.horizontal, 8)
+                                .padding(.vertical, 3)
+                                .background(.ultraThinMaterial, in: Capsule())
+                                .overlay(Capsule().strokeBorder(Theme.hairline(highContrast: highContrast), lineWidth: 0.5))
+                                .allowsHitTesting(false)
+                                .transition(.opacity)
+                        }
+                    }
+                    .onHover { inside in
+                        hoveringBar = inside
+                        if inside {
+                            // Reveal after a quarter second of sustained hover.
+                            Task { @MainActor in
+                                try? await Task.sleep(nanoseconds: 250_000_000)
+                                if hoveringBar { withAnimation(.easeOut(duration: 0.1)) { showScore = true } }
+                            }
+                        } else {
+                            withAnimation(.easeOut(duration: 0.1)) { showScore = false }
+                        }
+                    }
             }
         }
     }
@@ -277,9 +291,17 @@ final class AskViewModel: NSObject, ObservableObject {
             let pct = relevancePercents(sources)
             out += "\n\n\(Defaults.sourcesListLabel)\n"
             out += sources.map { source in
-                let line = formatSource(source.number, source.ref)
+                var line = formatSource(source.number, source.ref)
                 // The exact relevance figure travels with the pasted text.
-                return pct[source.number].map { "\(line)  \u{00B7} \($0)% relevant" } ?? line
+                if let percent = pct[source.number] {
+                    line += "  \u{00B7} \(percent)% relevant"
+                }
+                // The exact chunk text the model was shown, so the citation
+                // is checkable against its real source.
+                if let quoted = quotedExcerpt(source.ref) {
+                    line += "  \u{00B7} \(quoted)"
+                }
+                return line
             }.joined(separator: "\n")
         }
         return out

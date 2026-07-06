@@ -129,19 +129,25 @@ public struct SourceRef: Sendable, Equatable {
     /// Retrieval relevance (best RRF score among this email's chunks); nil when
     /// unranked. Raw and unnormalized — the UI scales it per answer.
     public var relevance: Double?
+    /// The exact chunk text retrieved for this source (the best-scoring
+    /// chunk's `ContextChunk.text`) — what the model actually saw, shown on
+    /// hover and included in the clipboard export so the citation is
+    /// checkable against its real source text.
+    public var excerpt: String
 
     /// Who should be cited as the source: the original author when this is a
     /// forwarded message, else the raw sender.
     public var attributedSender: String { originalSender ?? sender }
 
     public init(messageID: String, subject: String, sender: String, originalSender: String? = nil,
-                dateUnix: Int64, relevance: Double? = nil) {
+                dateUnix: Int64, relevance: Double? = nil, excerpt: String = "") {
         self.messageID = messageID
         self.subject = subject
         self.sender = sender
         self.originalSender = originalSender
         self.dateUnix = dateUnix
         self.relevance = relevance
+        self.excerpt = excerpt
     }
 }
 
