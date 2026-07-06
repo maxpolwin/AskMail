@@ -14,11 +14,16 @@ final class PanelController {
         // so the extra height below is invisible and lets answers grow downward.
         panel = NSPanel(
             contentRect: NSRect(x: 0, y: 0, width: 640, height: 500),
-            styleMask: [.nonactivatingPanel, .titled, .fullSizeContentView],
+            styleMask: [.nonactivatingPanel, .titled, .fullSizeContentView, .resizable],
             backing: .buffered,
             defer: false
         )
         panel.level = .floating
+        // User-resizable: drag any edge to change the card's format. The size
+        // (but not position, which stays pinned top-center) persists across
+        // relaunches under this autosave name.
+        panel.minSize = NSSize(width: 420, height: 220)
+        panel.setFrameAutosaveName("AskPanel")
         panel.titleVisibility = .hidden
         panel.titlebarAppearsTransparent = true
         panel.isMovableByWindowBackground = true
