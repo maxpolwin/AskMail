@@ -7,6 +7,7 @@ import UniformTypeIdentifiers
 struct SettingsView: View {
     @ObservedObject private var settings = SettingsStore.shared
     @ObservedObject private var vectorizer = Vectorizer.shared
+    @ObservedObject private var engine = OllamaEngine.shared
     @State private var ollamaCloudKey = ""
     @State private var mistralKey = ""
     @State private var keysStatus = ""
@@ -117,6 +118,28 @@ struct SettingsView: View {
                     .foregroundStyle(.secondary)
             }
 
+            Section("Local engine") {
+                engineStatusRow
+                if let progress = engine.pullProgress, let model = engine.pullingModel {
+                    VStack(alignment: .leading, spacing: 6) {
+                        Text("Downloading \(model) \u{2014} \(progress.status)")
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                        if let fraction = progress.fraction {
+                            ProgressView(value: fraction)
+                        } else {
+                            AnimatedHairline(active: true)
+                        }
+                    }
+                }
+                if !engine.message.isEmpty {
+                    Text(engine.message).font(.caption).foregroundStyle(.secondary)
+                }
+                Text("AskMail runs models locally with Ollama. Your email never leaves this Mac.")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+            }
+
             Section("Generation") {
                 Picker("Provider", selection: $settings.provider) {
                     Text("Ollama (local)").tag(ProviderChoice.ollamaLocal)
@@ -171,6 +194,7 @@ struct SettingsView: View {
             loadAccounts()
             launchAtLogin = LoginItem.isEnabled   // reflect external changes
             vectorizer.refreshFailedCount()
+            Task { await engine.refresh() }
         }
         .alert("Export debug logs?", isPresented: $showExportLogsWarning) {
             Button("Export\u{2026}", role: .destructive) { exportLogs() }
@@ -182,6 +206,45 @@ struct SettingsView: View {
                             isPresented: $showRebuildConfirmation) {
             Button("Delete & rebuild", role: .destructive) { deleteAndRebuild() }
             Button("Cancel", role: .cancel) {}
+        }
+    }
+
+    /// Status + one-click fix for the local Ollama runtime, mirroring the Full
+    /// Disk Access pattern: each state renders guidance and the button that
+    /// resolves it. Derivation lives in AskMailCore (`OllamaStatus`).
+    @ViewBuilder
+    private var engineStatusRow: some View {
+        switch engine.status {
+        case nil:
+            Text("Checking Ollama\u{2026}")
+                .font(.caption)
+                .foregroundStyle(.secondary)
+        case .notInstalled:
+            Text("Ollama isn\u{2019}t installed. It runs the local models AskMail uses for search and answers.")
+                .font(.caption)
+                .foregroundStyle(.secondary)
+            HStack {
+                Button("Download Ollama\u{2026}") { engine.openDownloadPage() }
+                Button("Check again") { Task { await engine.refresh() } }
+            }
+        case .stopped:
+            Text("Ollama is installed but not running.")
+                .font(.caption)
+                .foregroundStyle(.secondary)
+            Button("Start Ollama") { Task { await engine.startOllama() } }
+        case .runningModelMissing(let model):
+            Text("Ollama is running, but the embedding model \u{2018}\(model)\u{2019} isn\u{2019}t installed. AskMail needs it to index your email.")
+                .font(.caption)
+                .foregroundStyle(.secondary)
+            Button("Download \(model) (~\(Defaults.embeddingModelApproxMB) MB)") {
+                Task { await engine.pull(model: model) }
+            }
+            .disabled(engine.pullingModel != nil)
+        case .ready(let count):
+            Label("Ollama ready \u{00B7} \(count) model\(count == 1 ? "" : "s") installed",
+                  systemImage: "checkmark.circle")
+                .font(.callout)
+                .foregroundStyle(.secondary)
         }
     }
 

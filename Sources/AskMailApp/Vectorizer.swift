@@ -104,7 +104,7 @@ final class Vectorizer: ObservableObject {
                 status = "Stopped: Ollama isn\u{2019}t running. Start it (\u{2018}ollama serve\u{2019}), then Vectorize now \u{2014} it resumes where it left off."
             case .embeddingModelMissing(let model):
                 RollingLog.shared.log("\(trigger.rawValue) vectorize stopped: embedding model \(model) not installed", level: .error)
-                status = "Stopped: the embedding model \u{2018}\(model)\u{2019} isn\u{2019}t installed. Run \u{2018}ollama pull \(model)\u{2019} in Terminal, then Vectorize now \u{2014} it resumes where it left off."
+                status = "Stopped: the embedding model \u{2018}\(model)\u{2019} isn\u{2019}t installed. Download it above in Local engine, then Vectorize now \u{2014} it resumes where it left off."
             }
             return nil
         } catch {
@@ -169,7 +169,7 @@ final class Vectorizer: ObservableObject {
                 status = "Stopped: Ollama isn\u{2019}t running. Start it (\u{2018}ollama serve\u{2019}), then retry \u{2014} it resumes where it left off."
             case .embeddingModelMissing(let model):
                 RollingLog.shared.log("retry vectorize stopped: embedding model \(model) not installed", level: .error)
-                status = "Stopped: the embedding model \u{2018}\(model)\u{2019} isn\u{2019}t installed. Run \u{2018}ollama pull \(model)\u{2019} in Terminal, then retry \u{2014} it resumes where it left off."
+                status = "Stopped: the embedding model \u{2018}\(model)\u{2019} isn\u{2019}t installed. Download it above in Local engine, then retry \u{2014} it resumes where it left off."
             }
             return nil
         } catch {

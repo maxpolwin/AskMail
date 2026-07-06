@@ -6,6 +6,9 @@ public enum Defaults {
     // MARK: Models
     public static let embeddingModel = "nomic-embed-text"
     public static let localChatModel = "qwen2.5:7b"
+    /// Shown before a user-initiated download so the size is never a surprise
+    /// (the actual `/api/pull` is ~274 MB for nomic-embed-text).
+    public static let embeddingModelApproxMB = 275
     public static let cloudChatModel = "qwen3.5:cloud"
     public static let mistralChatModel = "mistral-large-latest"
     public static let ollamaLocalHost = URL(string: "http://localhost:11434")!

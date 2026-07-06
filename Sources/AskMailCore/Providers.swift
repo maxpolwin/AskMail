@@ -45,7 +45,7 @@ public enum ProviderError: Error, CustomStringConvertible {
             return "no API key in Keychain for service \(service)"
         case .ollamaModelMissing(let model):
             return "Ollama model \u{201C}\(model)\u{201D} isn\u{2019}t installed. "
-                + "Run \u{2018}ollama pull \(model)\u{2019} in Terminal, then try again."
+                + "Download it in Settings \u{2192} Local engine, then try again."
         }
     }
 
