@@ -74,6 +74,7 @@ Rules:
 - Assign numbers **after** the token-budget trim (Section 2), so dropped chunks never leave holes in the numbering.
 - `date` is the converted Unix date rendered `YYYY-MM-DD` (Cocoa-epoch conversion already done at ingestion, Section B4).
 - Order strictly by fused rank; do not re-sort by date. Recency is handled by the date-filter preprocessing (B6 step 5), not by context ordering.
+- Forwarded messages: when the body contains a recognized forward marker (Apple Mail's "Begin forwarded message:", Gmail's "---------- Forwarded message ---------", Outlook's "-----Original Message-----"), `{sender}` becomes `{originalSender} (forwarded by {sender})` — the citation attributes to the original author, not the forwarder. Unrecognized forward formats fall back to citing the forwarder, same as today.
 
 ---
 

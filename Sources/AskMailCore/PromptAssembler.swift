@@ -52,6 +52,7 @@ public struct PromptAssembler: Sendable {
             sourceMap[nextNumber] = SourceRef(messageID: chunk.messageID,
                                               subject: chunk.subject,
                                               sender: chunk.sender,
+                                              originalSender: chunk.originalSender,
                                               dateUnix: chunk.dateUnix,
                                               relevance: chunk.score > 0 ? chunk.score : nil)
             nextNumber += 1
@@ -77,7 +78,9 @@ public struct PromptAssembler: Sendable {
     // MARK: Context block (§3)
 
     func renderChunk(_ chunk: ContextChunk, number: Int) -> String {
-        "--- [\(number)] from: \(chunk.sender) | date: \(Self.ymd(chunk.dateUnix)) | source: \(chunk.source.rawValue) ---\n\(chunk.text)"
+        // Forwarded messages cite the original author, not whoever forwarded it.
+        let attribution = chunk.originalSender.map { "\($0) (forwarded by \(chunk.sender))" } ?? chunk.sender
+        return "--- [\(number)] from: \(attribution) | date: \(Self.ymd(chunk.dateUnix)) | source: \(chunk.source.rawValue) ---\n\(chunk.text)"
     }
 
     /// Drops lowest-ranked chunks first while over `contextTokenLimit`.

@@ -272,6 +272,7 @@ public final class MailboxIngestor {
                                          account: account,
                                          subject: email.subject,
                                          sender: email.sender,
+                                         originalSender: email.originalSender,
                                          dateUnix: email.dateUnix)
         let rows = pieces.enumerated().map { index, piece in
             (source: piece.source,

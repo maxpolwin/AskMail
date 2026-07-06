@@ -57,9 +57,15 @@ public final class SQLiteStore {
           account TEXT NOT NULL,
           subject TEXT NOT NULL,
           sender TEXT NOT NULL,
+          original_sender TEXT,
           date_unix INTEGER NOT NULL
         );
         """)
+        // Added after the initial release; existing DBs need the column added
+        // explicitly since CREATE TABLE IF NOT EXISTS is a no-op for them.
+        if !(try columnExists("messages", "original_sender")) {
+            try execute("ALTER TABLE messages ADD COLUMN original_sender TEXT")
+        }
         try execute("""
         CREATE TABLE IF NOT EXISTS chunks(
           id INTEGER PRIMARY KEY,
@@ -116,24 +122,32 @@ public final class SQLiteStore {
     // MARK: Messages & chunks
 
     /// Inserts or updates a message row; returns its primary key.
+    /// `originalSender` is the forwarded message's embedded original author
+    /// (`ForwardedEmail.detectOriginalSender`), nil for non-forwarded mail.
     @discardableResult
     public func upsertMessage(messageID: String, account: String, subject: String,
-                              sender: String, dateUnix: Int64) throws -> Int64 {
+                              sender: String, originalSender: String? = nil, dateUnix: Int64) throws -> Int64 {
         lock.lock(); defer { lock.unlock() }
         try run("""
-        INSERT INTO messages(message_id, account, subject, sender, date_unix)
-        VALUES (?, ?, ?, ?, ?)
+        INSERT INTO messages(message_id, account, subject, sender, original_sender, date_unix)
+        VALUES (?, ?, ?, ?, ?, ?)
         ON CONFLICT(message_id) DO UPDATE SET
           account = excluded.account,
           subject = excluded.subject,
           sender = excluded.sender,
+          original_sender = excluded.original_sender,
           date_unix = excluded.date_unix
         """) { statement in
             bind(statement, 1, messageID)
             bind(statement, 2, account)
             bind(statement, 3, subject)
             bind(statement, 4, sender)
-            sqlite3_bind_int64(statement, 5, dateUnix)
+            if let originalSender {
+                bind(statement, 5, originalSender)
+            } else {
+                sqlite3_bind_null(statement, 5)
+            }
+            sqlite3_bind_int64(statement, 6, dateUnix)
         }
         var pk: Int64 = 0
         try query("SELECT pk FROM messages WHERE message_id = ?") { statement in
@@ -233,7 +247,7 @@ public final class SQLiteStore {
         let placeholders = Array(repeating: "?", count: ids.count).joined(separator: ",")
         var byID: [Int64: ContextChunk] = [:]
         try query("""
-        SELECT c.id, m.message_id, m.subject, m.sender, m.date_unix, c.source, c.text
+        SELECT c.id, m.message_id, m.subject, m.sender, m.original_sender, m.date_unix, c.source, c.text
         FROM chunks c JOIN messages m ON m.pk = c.message_pk
         WHERE c.id IN (\(placeholders))
         """) { statement in
@@ -246,9 +260,10 @@ public final class SQLiteStore {
                 messageID: column(statement, 1),
                 subject: column(statement, 2),
                 sender: column(statement, 3),
-                dateUnix: sqlite3_column_int64(statement, 4),
-                source: ChunkSource(rawValue: column(statement, 5)) ?? .body,
-                text: column(statement, 6)
+                originalSender: nullableColumn(statement, 4),
+                dateUnix: sqlite3_column_int64(statement, 5),
+                source: ChunkSource(rawValue: column(statement, 6)) ?? .body,
+                text: column(statement, 7)
             )
             byID[chunk.chunkID] = chunk
         }
@@ -264,7 +279,7 @@ public final class SQLiteStore {
         lock.lock(); defer { lock.unlock() }
         var results: [ContextChunk] = []
         try query("""
-        SELECT c.id, m.message_id, m.subject, m.sender, m.date_unix, c.source, c.text
+        SELECT c.id, m.message_id, m.subject, m.sender, m.original_sender, m.date_unix, c.source, c.text
         FROM chunks c JOIN messages m ON m.pk = c.message_pk
         WHERE m.date_unix BETWEEN ? AND ?
         ORDER BY m.date_unix ASC
@@ -279,9 +294,10 @@ public final class SQLiteStore {
                 messageID: column(statement, 1),
                 subject: column(statement, 2),
                 sender: column(statement, 3),
-                dateUnix: sqlite3_column_int64(statement, 4),
-                source: ChunkSource(rawValue: column(statement, 5)) ?? .body,
-                text: column(statement, 6)
+                originalSender: nullableColumn(statement, 4),
+                dateUnix: sqlite3_column_int64(statement, 5),
+                source: ChunkSource(rawValue: column(statement, 6)) ?? .body,
+                text: column(statement, 7)
             ))
         }
         return results
@@ -514,5 +530,20 @@ public final class SQLiteStore {
     private func column(_ statement: OpaquePointer, _ index: Int32) -> String {
         guard let text = sqlite3_column_text(statement, index) else { return "" }
         return String(cString: text)
+    }
+
+    private func nullableColumn(_ statement: OpaquePointer, _ index: Int32) -> String? {
+        guard let text = sqlite3_column_text(statement, index) else { return nil }
+        return String(cString: text)
+    }
+
+    private func columnExists(_ table: String, _ column: String) throws -> Bool {
+        var exists = false
+        try query("PRAGMA table_info(\(table))") { _ in } row: { statement in
+            if String(cString: sqlite3_column_text(statement, 1)) == column {
+                exists = true
+            }
+        }
+        return exists
     }
 }

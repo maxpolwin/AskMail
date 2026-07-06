@@ -7,10 +7,29 @@ import XCTest
 final class PromptContractTests: XCTestCase {
 
     func chunk(_ id: Int64, message: String, sender: String = "sender@example.com",
+               originalSender: String? = nil,
                dateUnix: Int64 = 1_772_439_240, source: ChunkSource = .body,
                text: String) -> ContextChunk {
         ContextChunk(chunkID: id, messageID: message, subject: "Subject \(message)",
-                     sender: sender, dateUnix: dateUnix, source: source, text: text)
+                     sender: sender, originalSender: originalSender,
+                     dateUnix: dateUnix, source: source, text: text)
+    }
+
+    // A forwarded message cites the original author, not the forwarder, and
+    // notes who forwarded it (docs/prompt-contract.md §3).
+    func testForwardedMessageCitesOriginalSender() {
+        let assembler = PromptAssembler()
+        let prompt = assembler.assemble(
+            question: "q",
+            chunks: [
+                chunk(1, message: "a@x", sender: "forwarder@example.com",
+                      originalSender: "jane@example.com", text: "fwd body"),
+            ],
+            session: []
+        )
+        XCTAssertEqual(prompt.sourceMap[1]?.attributedSender, "jane@example.com")
+        XCTAssertTrue(prompt.user.contains(
+            "from: jane@example.com (forwarded by forwarder@example.com)"))
     }
 
     // §3: numbers are per distinct email; two chunks of one email share one N.

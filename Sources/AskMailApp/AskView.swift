@@ -6,7 +6,7 @@ import SwiftUI
 /// The source body "domain (date): subject" (no number) — the shared bit the
 /// on-screen row colours as primary text and the clipboard export reuses.
 func sourceBody(_ ref: SourceRef) -> String {
-    "\(MailHeader.domain(fromSender: ref.sender)) "
+    "\(MailHeader.domain(fromSender: ref.attributedSender)) "
         + "(\(PromptAssembler.ymd(ref.dateUnix))): \(MailHeader.decode(ref.subject))"
 }
 

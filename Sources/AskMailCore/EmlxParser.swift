@@ -64,14 +64,21 @@ public enum EmlxParser {
         var skipped: [String] = []
         collectContent(from: root, texts: &texts, pdfs: &pdfs, skipped: &skipped)
 
+        let extractedText = texts.joined(separator: "\n\n")
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+        // Detect before stripping: the original sender comes from the header
+        // block that stripHeaderBlock is about to remove.
+        let originalSender = ForwardedEmail.detectOriginalSender(in: extractedText)
+        let cleanedText = ForwardedEmail.stripHeaderBlock(from: extractedText)
+
         return ParsedEmail(
             messageID: messageID,
             subject: root.header("Subject") ?? "",
             sender: root.header("From") ?? "",
+            originalSender: originalSender,
             recipient: root.header("To") ?? "",
             date: root.header("Date").flatMap(parseRFC5322Date),
-            bodyText: texts.joined(separator: "\n\n")
-                .trimmingCharacters(in: .whitespacesAndNewlines),
+            bodyText: cleanedText,
             pdfAttachments: pdfs,
             skippedAttachments: skipped
         )

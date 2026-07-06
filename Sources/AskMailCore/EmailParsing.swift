@@ -34,7 +34,8 @@ public struct InProcessEmailParser: EmailParsing {
             IngestableEmail.PdfAttachmentText(filename: $0.filename, text: PdfText.extract(data: $0.data))
         }
         return IngestableEmail(messageID: email.messageID, subject: email.subject,
-                               sender: email.sender, dateUnix: email.dateUnix,
+                               sender: email.sender, originalSender: email.originalSender,
+                               dateUnix: email.dateUnix,
                                bodyText: email.bodyText, pdfAttachments: pdfTexts,
                                skippedAttachments: email.skippedAttachments)
     }
