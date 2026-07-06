@@ -73,9 +73,7 @@ public final class QueryService: @unchecked Sendable {
     /// Clears the in-memory multi-turn buffer. Call when the panel closes
     /// (FR-3: a fresh session must not recall the prior question).
     public func clearSession() {
-        lock.lock()
-        session.removeAll()
-        lock.unlock()
+        lock.withLock { session.removeAll() }
     }
 
     public func ask(_ question: String, settings: QuerySettings) async throws -> QueryResult {
@@ -97,10 +95,7 @@ public final class QueryService: @unchecked Sendable {
         // 3. Assemble per the prompt contract.
         let assembler = PromptAssembler(systemPrompt: settings.systemPrompt,
                                         contextTokenLimit: settings.contextTokenLimit)
-        let currentSession: [SessionTurn]
-        lock.lock()
-        currentSession = session
-        lock.unlock()
+        let currentSession = lock.withLock { session }
         let prompt = assembler.assemble(question: question, chunks: chunks, session: currentSession)
 
         // 4. Route and stream, buffering the answer into the session on completion.
@@ -121,9 +116,9 @@ public final class QueryService: @unchecked Sendable {
                         continuation.yield(event)
                     }
                     if let self, !answer.isEmpty {
-                        self.lock.lock()
-                        self.session.append(SessionTurn(question: question, answer: answer))
-                        self.lock.unlock()
+                        self.lock.withLock {
+                            self.session.append(SessionTurn(question: question, answer: answer))
+                        }
                     }
                     continuation.finish()
                 } catch {
