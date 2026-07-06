@@ -2,11 +2,17 @@ import AppKit
 import AskMailCore
 import SwiftUI
 
-/// One source rendered as "N  domain (date): subject" — shared by the on-screen
-/// row and the clipboard export so the two presentations never drift.
-func formatSource(_ number: Int, _ ref: SourceRef) -> String {
-    "\(number)  \(MailHeader.domain(fromSender: ref.sender)) "
+/// The source body "domain (date): subject" (no number) — the shared bit the
+/// on-screen row colours as primary text and the clipboard export reuses.
+func sourceBody(_ ref: SourceRef) -> String {
+    "\(MailHeader.domain(fromSender: ref.sender)) "
         + "(\(PromptAssembler.ymd(ref.dateUnix))): \(MailHeader.decode(ref.subject))"
+}
+
+/// "N  domain (date): subject" for the clipboard export; the on-screen row
+/// builds the same text but two-toned (see `SourceRow`).
+func formatSource(_ number: Int, _ ref: SourceRef) -> String {
+    "\(number)  \(sourceBody(ref))"
 }
 
 /// The model answers in Markdown (`**bold**`, `*italic*`, `` `code` ``). Parse
@@ -80,11 +86,15 @@ private struct SourceRow: View {
         }
     }
 
-    /// Accent-coloured line with a `message://` link, so it opens on click yet
-    /// still selects and copies as text.
+    /// The number in the system accent (matching the bar), the rest in primary
+    /// text like the answer. Carries a `message://` link so it opens on click
+    /// yet still selects and copies as text.
     private var line: AttributedString {
-        var line = AttributedString(formatSource(number, ref))
-        line.foregroundColor = Theme.accent
+        var num = AttributedString("\(number)")
+        num.foregroundColor = Theme.accent
+        var body = AttributedString("  " + sourceBody(ref))
+        body.foregroundColor = .primary
+        var line = num + body
         line.link = CitationRenderer.messageURL(messageID: ref.messageID)
         return line
     }
