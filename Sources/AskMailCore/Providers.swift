@@ -49,11 +49,13 @@ public enum ProviderError: Error, CustomStringConvertible {
         }
     }
 
-    /// Whether an error is Ollama's "model … not found, try pulling it first"
-    /// 404 — a missing local model, which retrying won't fix and which has an
-    /// exact remedy, as opposed to any other client error.
+    /// Whether an error is Ollama's missing-model 404 — which retrying won't
+    /// fix and which has an exact remedy, as opposed to any other client error.
+    /// The body wording varies by endpoint and version (verified on 0.31.1):
+    /// /api/embed says "model … not found, try pulling it first" while
+    /// /api/chat says just "model '…' not found".
     public static func isOllamaModelMissing(status: Int, body: String) -> Bool {
-        status == 404 && body.contains("try pulling")
+        status == 404 && body.contains("not found")
     }
 }
 

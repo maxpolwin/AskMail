@@ -79,7 +79,7 @@ final class Vectorizer: ObservableObject {
         do {
             let store = try SQLiteStore(path: SettingsStore.databasePath)
             let ingestor = MailboxIngestor(store: store,
-                                           embedder: OllamaEmbedder(),
+                                           embedder: OllamaEmbedder(model: settings.embeddingModel),
                                            account: storageKey)
             let files = EmlxLocator.scan(accountDirectory: directory)
                 .sorted { $0.sourceID < $1.sourceID }
@@ -146,7 +146,7 @@ final class Vectorizer: ObservableObject {
                 return nil
             }
             let ingestor = MailboxIngestor(store: store,
-                                           embedder: OllamaEmbedder(),
+                                           embedder: OllamaEmbedder(model: settings.embeddingModel),
                                            account: storageKey)
             let files = EmlxLocator.scan(accountDirectory: directory)
                 .filter { failedIDs.contains($0.sourceID) }

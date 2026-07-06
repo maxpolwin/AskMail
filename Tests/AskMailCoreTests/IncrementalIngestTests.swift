@@ -193,13 +193,17 @@ final class RetryTests: XCTestCase {
         XCTAssertTrue(OllamaEmbedder.isTransient(URLError(.timedOut)))
     }
 
-    // Only Ollama's specific "try pulling it first" 404 is treated as a missing
-    // model; other 404s (and non-404s) are ordinary errors.
+    // Only Ollama's missing-model 404 counts; other 404s and non-404s are
+    // ordinary errors. The body wording differs per endpoint (0.31.1):
+    // /api/embed appends "try pulling it first", /api/chat doesn't.
     func testModelMissingDetection() {
         XCTAssertTrue(ProviderError.isOllamaModelMissing(
             status: 404,
             body: #"{"error":"model \"nomic-embed-text\" not found, try pulling it first"}"#))
-        XCTAssertFalse(ProviderError.isOllamaModelMissing(status: 404, body: "not found"))
-        XCTAssertFalse(ProviderError.isOllamaModelMissing(status: 500, body: "try pulling"))
+        XCTAssertTrue(ProviderError.isOllamaModelMissing(
+            status: 404,
+            body: #"{"error":"model 'qwen2.5:7b' not found"}"#))
+        XCTAssertFalse(ProviderError.isOllamaModelMissing(status: 404, body: "no such route"))
+        XCTAssertFalse(ProviderError.isOllamaModelMissing(status: 500, body: "model not found"))
     }
 }

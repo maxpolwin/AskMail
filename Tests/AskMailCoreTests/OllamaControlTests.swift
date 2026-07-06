@@ -136,33 +136,45 @@ final class OllamaControlTests: XCTestCase {
     func testReporterComposesReachabilityAndTags() async {
         let embed = InstalledModel(name: "nomic-embed-text:latest", sizeBytes: 1)
 
-        var status = await OllamaStatusReporter.current(
+        var snapshot = await OllamaStatusReporter.snapshot(
             control: StubOllamaControl(reachable: false), binaryPresent: false)
-        XCTAssertEqual(status, .notInstalled)
+        XCTAssertEqual(snapshot.status, .notInstalled)
 
-        status = await OllamaStatusReporter.current(
+        snapshot = await OllamaStatusReporter.snapshot(
             control: StubOllamaControl(reachable: false), binaryPresent: true)
-        XCTAssertEqual(status, .stopped)
+        XCTAssertEqual(snapshot.status, .stopped)
 
-        status = await OllamaStatusReporter.current(
+        snapshot = await OllamaStatusReporter.snapshot(
             control: StubOllamaControl(reachable: true, models: .success([])),
             binaryPresent: true)
-        XCTAssertEqual(status, .runningModelMissing(model: Defaults.embeddingModel))
+        XCTAssertEqual(snapshot.status, .runningModelMissing(model: Defaults.embeddingModel))
 
-        status = await OllamaStatusReporter.current(
+        snapshot = await OllamaStatusReporter.snapshot(
             control: StubOllamaControl(reachable: true, models: .success([embed])),
             binaryPresent: true)
-        XCTAssertEqual(status, .ready(modelCount: 1))
+        XCTAssertEqual(snapshot.status, .ready(modelCount: 1))
+        XCTAssertEqual(snapshot.installedModels, [embed], "the picker list rides along")
     }
 
     func testReporterTreatsTagsFailureAsModelMissingNotReady() async {
         // Daemon up but /api/tags erroring: show the actionable state, never
         // claim readiness that wasn't observed.
-        let status = await OllamaStatusReporter.current(
+        let snapshot = await OllamaStatusReporter.snapshot(
             control: StubOllamaControl(reachable: true,
                                        models: .failure(ProviderError.http(status: 500, body: ""))),
             binaryPresent: true)
-        XCTAssertEqual(status, .runningModelMissing(model: Defaults.embeddingModel))
+        XCTAssertEqual(snapshot.status, .runningModelMissing(model: Defaults.embeddingModel))
+        XCTAssertEqual(snapshot.installedModels, [])
+    }
+
+    func testReporterHonorsConfiguredEmbeddingModel() async {
+        // The required model is the user's setting, not a constant.
+        let other = InstalledModel(name: "mxbai-embed-large:latest", sizeBytes: 1)
+        let snapshot = await OllamaStatusReporter.snapshot(
+            control: StubOllamaControl(reachable: true, models: .success([other])),
+            binaryPresent: true,
+            requiredEmbeddingModel: "mxbai-embed-large")
+        XCTAssertEqual(snapshot.status, .ready(modelCount: 1))
     }
 
     // MARK: Install locator

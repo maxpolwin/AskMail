@@ -146,6 +146,19 @@ struct SettingsView: View {
                     Text("Ollama Cloud").tag(ProviderChoice.ollamaCloud)
                     Text("Mistral API").tag(ProviderChoice.mistral)
                 }
+
+                modelPicker(title: "Chat model", kind: .chat,
+                            selection: $settings.localChatModel)
+                Text("Used for local answers, and as the fallback when a cloud provider fails.")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+
+                modelPicker(title: "Embedding model", kind: .embedding,
+                            selection: $settings.embeddingModel)
+                Text("Used to index and search your email. Changing it requires re-indexing (Delete & rebuild).")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+
                 Stepper("Context tokens: \(settings.contextTokenLimit)",
                         value: $settings.contextTokenLimit, in: 512...16384, step: 512)
                 Stepper("Answer tokens: \(settings.answerTokenLimit)",
@@ -245,6 +258,36 @@ struct SettingsView: View {
                   systemImage: "checkmark.circle")
                 .font(.callout)
                 .foregroundStyle(.secondary)
+        }
+    }
+
+    /// One model picker: selectable rows are the merge of the curated catalog
+    /// with what's actually installed (grouping logic in `ModelCatalog`,
+    /// unit-tested); recommended-but-missing models get an in-place download
+    /// row with size + guidance blurb instead of a dead picker entry.
+    @ViewBuilder
+    private func modelPicker(title: String, kind: ModelOption.Kind,
+                             selection: Binding<String>) -> some View {
+        let groups = ModelCatalog.pickerGroups(kind: kind,
+                                               installed: engine.installedModels,
+                                               selected: selection.wrappedValue)
+        Picker(title, selection: selection) {
+            ForEach(groups.selectable) { choice in
+                Text(choice.label).tag(choice.id)
+            }
+        }
+        ForEach(groups.downloadable, id: \.id) { option in
+            HStack {
+                VStack(alignment: .leading, spacing: 2) {
+                    Text(option.id).font(.caption)
+                    Text(option.blurb).font(.caption).foregroundStyle(.secondary)
+                }
+                Spacer()
+                Button("Download (\(option.sizeLabel))") {
+                    Task { await engine.pull(model: option.id) }
+                }
+                .disabled(engine.pullingModel != nil)
+            }
         }
     }
 

@@ -13,6 +13,16 @@ final class SettingsStore: ObservableObject {
     @Published var provider: ProviderChoice {
         didSet { defaults.set(provider.rawValue, forKey: "provider") }
     }
+    /// Local Ollama chat model, both as the primary (local provider) and the
+    /// fallback when a cloud provider fails.
+    @Published var localChatModel: String {
+        didSet { defaults.set(localChatModel, forKey: "localChatModel") }
+    }
+    /// Local Ollama embedding model. Changing it invalidates the vector index
+    /// (vectors from different models don't mix) — the swap flow handles that.
+    @Published var embeddingModel: String {
+        didSet { defaults.set(embeddingModel, forKey: "embeddingModel") }
+    }
     @Published var systemPrompt: String {
         didSet { defaults.set(systemPrompt, forKey: "systemPrompt") }
     }
@@ -56,6 +66,8 @@ final class SettingsStore: ObservableObject {
 
     private init() {
         provider = ProviderChoice(rawValue: defaults.string(forKey: "provider") ?? "") ?? .ollamaLocal
+        localChatModel = defaults.string(forKey: "localChatModel") ?? Defaults.localChatModel
+        embeddingModel = defaults.string(forKey: "embeddingModel") ?? Defaults.embeddingModel
         systemPrompt = defaults.string(forKey: "systemPrompt") ?? Defaults.defaultSystemPrompt
         let contextLimit = defaults.integer(forKey: "contextTokenLimit")
         contextTokenLimit = contextLimit > 0 ? contextLimit : Defaults.contextTokenLimit
@@ -100,7 +112,8 @@ final class SettingsStore: ObservableObject {
         QuerySettings(provider: provider,
                       systemPrompt: systemPrompt,
                       contextTokenLimit: contextTokenLimit,
-                      answerTokenLimit: answerTokenLimit)
+                      answerTokenLimit: answerTokenLimit,
+                      localModel: localChatModel)
     }
 
     static var databasePath: String {

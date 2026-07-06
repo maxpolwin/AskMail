@@ -236,23 +236,33 @@ public enum OllamaStatus: Sendable, Equatable {
     }
 }
 
-/// Composes daemon reachability + the installed-model list into one status.
+/// Composes daemon reachability + the installed-model list into one snapshot.
 /// The network side comes through the `OllamaControlling` protocol so tests
-/// stub it; the filesystem side is a plain bool computed by the caller.
+/// stub it; the filesystem side is a plain bool computed by the caller. The
+/// installed list rides along because the model pickers need it and it comes
+/// from the same `/api/tags` call the status does.
 public enum OllamaStatusReporter {
-    public static func current(control: some OllamaControlling,
-                               binaryPresent: Bool,
-                               requiredEmbeddingModel: String = Defaults.embeddingModel) async -> OllamaStatus {
+    public struct Snapshot: Sendable, Equatable {
+        public let status: OllamaStatus
+        public let installedModels: [InstalledModel]
+    }
+
+    public static func snapshot(control: some OllamaControlling,
+                                binaryPresent: Bool,
+                                requiredEmbeddingModel: String = Defaults.embeddingModel) async -> Snapshot {
         guard await control.reachable() else {
-            return binaryPresent ? .stopped : .notInstalled
+            return Snapshot(status: binaryPresent ? .stopped : .notInstalled,
+                            installedModels: [])
         }
         // Reachable but /api/tags failing is transient (daemon restarting);
         // treat it as no models so the UI shows the actionable download state
         // rather than pretending readiness.
         let installed = (try? await control.installedModels()) ?? []
-        return OllamaStatus.derive(reachable: true, binaryPresent: binaryPresent,
-                                   installed: installed,
-                                   requiredEmbeddingModel: requiredEmbeddingModel)
+        return Snapshot(status: OllamaStatus.derive(reachable: true,
+                                                    binaryPresent: binaryPresent,
+                                                    installed: installed,
+                                                    requiredEmbeddingModel: requiredEmbeddingModel),
+                        installedModels: installed)
     }
 }
 

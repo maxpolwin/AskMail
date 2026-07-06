@@ -13,6 +13,8 @@ final class OllamaEngine: ObservableObject {
     /// nil while the first check is in flight, so the UI shows "checking"
     /// instead of flashing a wrong state.
     @Published private(set) var status: OllamaStatus?
+    /// What /api/tags reports; feeds the model pickers.
+    @Published private(set) var installedModels: [InstalledModel] = []
     /// Non-nil while a pull streams; drives the progress bar.
     @Published private(set) var pullProgress: PullProgress?
     @Published private(set) var pullingModel: String?
@@ -29,9 +31,12 @@ final class OllamaEngine: ObservableObject {
     /// Re-derives the status from the daemon + disk. Cheap; call on Settings
     /// appear and after every action.
     func refresh() async {
-        status = await OllamaStatusReporter.current(
+        let snapshot = await OllamaStatusReporter.snapshot(
             control: control,
-            binaryPresent: OllamaInstallLocator.binaryPresent())
+            binaryPresent: OllamaInstallLocator.binaryPresent(),
+            requiredEmbeddingModel: SettingsStore.shared.embeddingModel)
+        status = snapshot.status
+        installedModels = snapshot.installedModels
     }
 
     /// Opens the official download page — installing is the one step that has
