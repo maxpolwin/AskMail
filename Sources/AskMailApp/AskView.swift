@@ -51,10 +51,15 @@ func relevancePercents(_ sources: [(number: Int, ref: SourceRef)]) -> [Int: Int]
 
 /// One source: the accent-coloured, clickable, selectable line and a relevance
 /// bar. Hovering the label (domain/date/subject) shows the exact chunk text
-/// the model was shown, via the system tooltip. Hovering the bar reveals the
-/// relevance figure within 250 ms — faster than the system tooltip, which
-/// `.help()` can't speed up — worded plainly as "Relevance score: NN%". The
-/// two hover targets are independent so they never fight over the same spot.
+/// the model was shown; hovering the bar reveals the relevance figure within
+/// 250 ms. Both use `.popover` rather than a custom-positioned overlay: the
+/// floating panel's window doesn't grow to fit overlay content, so anything
+/// wide enough to overflow the panel's current bounds (a long excerpt, a
+/// source row near the right edge) got hard-clipped by the window edge — a
+/// system popover instead follows macOS's own on-screen placement, flipping
+/// side/position as needed to always render fully visible, and picks up the
+/// same translucent material the rest of the panel uses. The two hover
+/// targets are independent so they never fight over the same spot.
 private struct SourceRow: View {
     let number: Int
     let ref: SourceRef
@@ -65,6 +70,8 @@ private struct SourceRow: View {
     /// can open.
     let accessibleLinks: Bool
     let highContrast: Bool
+    @State private var hoveringLabel = false
+    @State private var showExcerpt = false
     @State private var hoveringBar = false
     @State private var showScore = false
     /// Routes through the same H-14 gate as every other link sink (set by
@@ -75,37 +82,45 @@ private struct SourceRow: View {
     var body: some View {
         HStack(spacing: 8) {
             rowLabel
-                .help(ref.excerpt)
+                .onHover { reveal($hoveringLabel, $showExcerpt, inside: $0) }
+                .popover(isPresented: $showExcerpt, arrowEdge: .bottom) {
+                    Text(ref.excerpt)
+                        .font(.callout)
+                        .foregroundStyle(.primary)
+                        .padding(12)
+                        .frame(maxWidth: 340, alignment: .leading)
+                        .fixedSize(horizontal: false, vertical: true)
+                        .background(.ultraThinMaterial)
+                }
             Spacer(minLength: 8)
             if let percent {
                 RelevanceBar(fraction: Double(percent) / 100, highContrast: highContrast)
                     .contentShape(Rectangle())  // hover target is the bar only
-                    .overlay(alignment: .trailing) {
-                        if showScore {
-                            Text("Relevance score: \(percent)%")
-                                .font(.caption.weight(.medium))
-                                .foregroundStyle(Theme.accent)
-                                .padding(.horizontal, 8)
-                                .padding(.vertical, 3)
-                                .background(.ultraThinMaterial, in: Capsule())
-                                .overlay(Capsule().strokeBorder(Theme.hairline(highContrast: highContrast), lineWidth: 0.5))
-                                .allowsHitTesting(false)
-                                .transition(.opacity)
-                        }
-                    }
-                    .onHover { inside in
-                        hoveringBar = inside
-                        if inside {
-                            // Reveal after a quarter second of sustained hover.
-                            Task { @MainActor in
-                                try? await Task.sleep(nanoseconds: 250_000_000)
-                                if hoveringBar { withAnimation(.easeOut(duration: 0.1)) { showScore = true } }
-                            }
-                        } else {
-                            withAnimation(.easeOut(duration: 0.1)) { showScore = false }
-                        }
+                    .onHover { reveal($hoveringBar, $showScore, inside: $0) }
+                    .popover(isPresented: $showScore, arrowEdge: .top) {
+                        Text("Relevance score: \(percent)%")
+                            .font(.callout.weight(.medium))
+                            .foregroundStyle(Theme.accent)
+                            .padding(.horizontal, 12)
+                            .padding(.vertical, 8)
+                            .background(.ultraThinMaterial)
                     }
             }
+        }
+    }
+
+    /// Shared reveal-on-sustained-hover timing for both callouts: flips
+    /// `hovering` immediately, but only shows the popover after 250 ms of
+    /// continued hover so a quick mouse pass-through doesn't flash it.
+    private func reveal(_ hovering: Binding<Bool>, _ shown: Binding<Bool>, inside: Bool) {
+        hovering.wrappedValue = inside
+        if inside {
+            Task { @MainActor in
+                try? await Task.sleep(nanoseconds: 250_000_000)
+                if hovering.wrappedValue { shown.wrappedValue = true }
+            }
+        } else {
+            shown.wrappedValue = false
         }
     }
 
