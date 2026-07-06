@@ -332,7 +332,10 @@ struct AskView: View {
     @State private var answerHeight: CGFloat = 0
     @State private var copied = false
     @State private var hoveringCard = false
-    private let maxAnswerHeight: CGFloat = 320
+    /// Height of everything in the card above the scroll area (question field,
+    /// hairline, warning), measured live so `scrollCap` can subtract it.
+    @State private var chromeHeight: CGFloat = 0
+    private let minAnswerHeight: CGFloat = 120
     /// Scale with System Settings ▸ Accessibility ▸ Display ▸ Text Size
     /// instead of staying pinned at a fixed point size.
     @ScaledMetric(relativeTo: .title2) private var questionFontSize: CGFloat = 21
@@ -348,36 +351,54 @@ struct AskView: View {
     var body: some View {
         // The card hugs its content at the top of a clear window; everything
         // below stays transparent, so an empty question bar is just that — no
-        // material dead space under the hairline.
-        VStack(spacing: 0) {
-            card
-            Spacer(minLength: 0)
+        // material dead space under the hairline. Measuring the available
+        // height here (post-padding) is what lets a taller panel actually
+        // reveal more of the answer instead of just growing invisible slack —
+        // see `scrollCap`.
+        GeometryReader { proxy in
+            VStack(spacing: 0) {
+                card(availableHeight: proxy.size.height)
+                Spacer(minLength: 0)
+            }
+            .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top)
         }
-        .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top)
         .padding(24)
         .onExitCommand { onDismiss() }   // Esc dismisses (and clears the session)
     }
 
-    private var card: some View {
+    /// The scroll area grows with the panel: taller window → more answer
+    /// visible before it scrolls, not just more invisible space below the
+    /// card. Floored so a very short/minimized panel still shows something.
+    private func scrollCap(for availableHeight: CGFloat) -> CGFloat {
+        max(minAnswerHeight, availableHeight - chromeHeight - 16 * 2 - 12)
+    }
+
+    private func card(availableHeight: CGFloat) -> some View {
         VStack(alignment: .leading, spacing: 12) {
-            VStack(alignment: .leading, spacing: 10) {
-                TextField("Ask your email\u{2026}", text: $model.question)
-                    .textFieldStyle(.plain)
-                    // Ephemeral, light weight — except Bold Text asked for
-                    // more legibility, which .light actively works against.
-                    .font(.system(size: questionFontSize, weight: legibilityWeight == .bold ? .regular : .light))
-                    .foregroundStyle(.primary)                // adapts light/dark
-                    .onSubmit { model.submit() }
-                    .overlay(alignment: .trailing) { copiedToast }
+            VStack(alignment: .leading, spacing: 12) {
+                VStack(alignment: .leading, spacing: 10) {
+                    TextField("Ask your email\u{2026}", text: $model.question)
+                        .textFieldStyle(.plain)
+                        // Ephemeral, light weight — except Bold Text asked for
+                        // more legibility, which .light actively works against.
+                        .font(.system(size: questionFontSize, weight: legibilityWeight == .bold ? .regular : .light))
+                        .foregroundStyle(.primary)                // adapts light/dark
+                        .onSubmit { model.submit() }
+                        .overlay(alignment: .trailing) { copiedToast }
 
-                AnimatedHairline(active: model.isStreaming, highContrast: settings.highContrastEnabled)
-            }
+                    AnimatedHairline(active: model.isStreaming, highContrast: settings.highContrastEnabled)
+                }
 
-            if let warning = model.warning {
-                Label(warning, systemImage: "exclamationmark.triangle")
-                    .font(.callout)
-                    .foregroundStyle(.orange)  // color-blind-safe warning hue
+                if let warning = model.warning {
+                    Label(warning, systemImage: "exclamationmark.triangle")
+                        .font(.callout)
+                        .foregroundStyle(.orange)  // color-blind-safe warning hue
+                }
             }
+            .background(GeometryReader { geo in
+                Color.clear.preference(key: ChromeHeightKey.self, value: geo.size.height)
+            })
+            .onPreferenceChange(ChromeHeightKey.self) { chromeHeight = $0 }
 
             // Present only when there's something to show — otherwise the card
             // ends at the hairline. Grows with content up to a cap, then scrolls.
@@ -406,13 +427,20 @@ struct AskView: View {
                         }
                     }
                     .textSelection(.enabled)
+                    .padding(.trailing, 6)  // breathing room before the (floating) scroll indicator
                     .frame(maxWidth: .infinity, alignment: .leading)
                     .contextMenu { Button("Copy") { copyOutput() } }
-                    .background(GeometryReader { geo in
-                        Color.clear.preference(key: ContentHeightKey.self, value: geo.size.height)
-                    })
+                    .background(
+                        ZStack {
+                            OverlayScrollerStyle()
+                            GeometryReader { geo in
+                                Color.clear.preference(key: ContentHeightKey.self, value: geo.size.height)
+                            }
+                        }
+                    )
                 }
-                .frame(height: min(answerHeight, maxAnswerHeight))
+                .contentMargins(.trailing, 8, for: .scrollIndicators)
+                .frame(height: min(answerHeight, scrollCap(for: availableHeight)))
                 .onPreferenceChange(ContentHeightKey.self) { answerHeight = $0 }
                 // Auto-copy the finished response; the toast confirms it.
                 .onChange(of: model.isStreaming) { _, streaming in
@@ -531,6 +559,32 @@ private struct ContentHeightKey: PreferenceKey {
     static func reduce(value: inout CGFloat, nextValue: () -> CGFloat) {
         value = max(value, nextValue())
     }
+}
+
+/// Height of the card's question field + hairline + warning (everything above
+/// the scroll area), so `AskView.scrollCap` can size the answer area to
+/// whatever room the panel actually has left rather than a fixed constant.
+private struct ChromeHeightKey: PreferenceKey {
+    static var defaultValue: CGFloat = 0
+    static func reduce(value: inout CGFloat, nextValue: () -> CGFloat) {
+        value = max(value, nextValue())
+    }
+}
+
+/// Forces the enclosing NSScrollView to macOS's slim, auto-hiding "overlay"
+/// scroller style regardless of System Settings ▸ Appearance ▸ "Show scroll
+/// bars" — legacy style reserves a fixed-width opaque track that always shows
+/// and crowds the answer text; overlay floats a thin, translucent indicator
+/// that only appears while scrolling, matching the panel's chrome-free look.
+private struct OverlayScrollerStyle: NSViewRepresentable {
+    func makeNSView(context: Context) -> NSView {
+        let probe = NSView(frame: .zero)
+        DispatchQueue.main.async {
+            probe.enclosingScrollView?.scrollerStyle = .overlay
+        }
+        return probe
+    }
+    func updateNSView(_ nsView: NSView, context: Context) {}
 }
 
 #Preview("Light \u{2014} empty (hugs the bar)") {
