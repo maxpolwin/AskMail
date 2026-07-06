@@ -255,6 +255,38 @@ public final class SQLiteStore {
         return ids.compactMap { byID[$0] }
     }
 
+    /// Loads chunks whose message falls inside `range`, oldest first,
+    /// bypassing semantic/keyword ranking entirely. Used when a question is
+    /// date-scoped (DateFilter) so that "what did I get on <date>" surfaces
+    /// every matching email regardless of how it scores against the raw
+    /// question text (contract B6 step 5).
+    public func chunks(dateRange range: ClosedRange<Int64>, limit: Int) throws -> [ContextChunk] {
+        lock.lock(); defer { lock.unlock() }
+        var results: [ContextChunk] = []
+        try query("""
+        SELECT c.id, m.message_id, m.subject, m.sender, m.date_unix, c.source, c.text
+        FROM chunks c JOIN messages m ON m.pk = c.message_pk
+        WHERE m.date_unix BETWEEN ? AND ?
+        ORDER BY m.date_unix ASC
+        LIMIT ?
+        """) { statement in
+            sqlite3_bind_int64(statement, 1, range.lowerBound)
+            sqlite3_bind_int64(statement, 2, range.upperBound)
+            sqlite3_bind_int(statement, 3, Int32(limit))
+        } row: { statement in
+            results.append(ContextChunk(
+                chunkID: sqlite3_column_int64(statement, 0),
+                messageID: column(statement, 1),
+                subject: column(statement, 2),
+                sender: column(statement, 3),
+                dateUnix: sqlite3_column_int64(statement, 4),
+                source: ChunkSource(rawValue: column(statement, 5)) ?? .body,
+                text: column(statement, 6)
+            ))
+        }
+        return results
+    }
+
     // MARK: Watermark & meta
 
     private static let watermarkKey = "watermark_date_unix"

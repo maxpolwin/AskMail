@@ -105,4 +105,39 @@ final class QueryServiceTests: XCTestCase {
         let prompt = assembler.assemble(question: "webinar", chunks: chunks, session: [])
         XCTAssertFalse(prompt.user.contains("Earlier in this conversation:"))
     }
+
+    // Reproduces the reported bug: a date-only question ("what emails did I
+    // get on <date>?") has no topical content for vector/keyword search to
+    // match against, so semantic ranking alone can bury the right email
+    // outside the top-N. Retrieval must also consult the store directly by
+    // date_unix once DateFilter resolves a range.
+    func testDateOnlyQuestionSurfacesEmailOutsideSemanticTopN() async throws {
+        let store = try SQLiteStore.inMemory()
+        let embedder = StubEmbedder()
+
+        // Decoys echo the question's wording and dominate the semantic
+        // top-N, but sit outside the date range asked about.
+        for i in 0..<40 {
+            let pk = try store.upsertMessage(messageID: "decoy\(i)@x", account: "acc",
+                                             subject: "S", sender: "s", dateUnix: 1)
+            let text = "emails emails did get during on emails decoy number \(i)"
+            let embedding = try await embedder.embed([text])[0]
+            try store.replaceChunks(messagePk: pk, chunks: [(.body, text, embedding)])
+        }
+
+        // The true target: dated 2026-06-10, with unrelated vocabulary.
+        let targetPk = try store.upsertMessage(messageID: "target@x", account: "acc",
+                                               subject: "Dentist", sender: "clinic",
+                                               dateUnix: 1_781_100_000)  // 2026-06-10
+        let targetText = "Your dentist appointment is confirmed for tomorrow at 3pm."
+        let targetEmbedding = try await embedder.embed([targetText])[0]
+        try store.replaceChunks(messagePk: targetPk, chunks: [(.body, targetText, targetEmbedding)])
+
+        let service = QueryService(store: store, embedder: embedder, log: { _, _ in })
+        let chunks = try await service.retrieve(question: "what emails did i get during on 2026-06-10?",
+                                                settings: QuerySettings())
+
+        XCTAssertTrue(chunks.contains { $0.messageID == "target@x" },
+                     "date-scoped retrieval must surface the target email even though it doesn't rank in the semantic top-N")
+    }
 }

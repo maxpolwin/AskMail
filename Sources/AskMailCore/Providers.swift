@@ -364,7 +364,7 @@ public struct ProviderRouter: Sendable {
             let task = Task {
                 do {
                     do {
-                        log("provider=\(primary.name) start", .debug)
+                        log("provider=\(primary.name) start maxTokens=\(request.maxTokens) temperature=\(request.temperature) contextWindow=\(request.contextWindow)", .debug)
                         for try await token in primary.stream(request) {
                             continuation.yield(.token(token))
                         }

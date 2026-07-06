@@ -97,6 +97,8 @@ public final class QueryService: @unchecked Sendable {
                                         contextTokenLimit: settings.contextTokenLimit)
         let currentSession = lock.withLock { session }
         let prompt = assembler.assemble(question: question, chunks: chunks, session: currentSession)
+        log("prompt.system:\n\(prompt.system)", .debug)
+        log("prompt.user:\n\(prompt.user)", .debug)
 
         // 4. Route and stream, buffering the answer into the session on completion.
         let router = makeRouter(settings: settings)
@@ -120,6 +122,7 @@ public final class QueryService: @unchecked Sendable {
                         continuation.yield(event)
                     }
                     if let self, !answer.isEmpty {
+                        self.log("llm answer:\n\(answer)", .debug)
                         self.lock.withLock {
                             self.session.append(SessionTurn(question: question, answer: answer))
                         }
@@ -155,12 +158,20 @@ public final class QueryService: @unchecked Sendable {
             }
 
         // Date-scoped questions filter candidates to the mentioned range
-        // (B6 step 5). If the filter empties the set, keep the unfiltered
-        // candidates: a wrong-month answer with sources beats a false no-match.
+        // (B6 step 5). Semantic/keyword search alone can miss the answer
+        // entirely when the question is date-only ("what did I get on
+        // <date>") with no topical content to rank against, so a date match
+        // also pulls candidates directly from the store by date_unix,
+        // bypassing relevance ranking. If nothing at all falls in range,
+        // keep the unfiltered candidates: a wrong-date answer with sources
+        // beats a false no-match.
         if let range = DateFilter.unixRange(question: question) {
-            let scoped = candidates.filter { range.contains($0.dateUnix) }
-            log("retrieval dateFilter=\(range) kept=\(scoped.count)/\(candidates.count)", .debug)
-            if !scoped.isEmpty { candidates = scoped }
+            let scopedFromSemantic = candidates.filter { range.contains($0.dateUnix) }
+            let direct = try store.chunks(dateRange: range, limit: settings.topK)
+            let alreadyIncluded = Set(scopedFromSemantic.map(\.chunkID))
+            let merged = scopedFromSemantic + direct.filter { !alreadyIncluded.contains($0.chunkID) }
+            log("retrieval dateFilter=\(range) semanticMatch=\(scopedFromSemantic.count) direct=\(direct.count) merged=\(merged.count)/\(candidates.count)", .debug)
+            if !merged.isEmpty { candidates = merged }
         }
 
         return Array(candidates.prefix(settings.topK))

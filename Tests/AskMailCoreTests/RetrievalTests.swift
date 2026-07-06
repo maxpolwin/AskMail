@@ -125,7 +125,7 @@ final class StoreTests: XCTestCase {
 
 final class DateFilterTests: XCTestCase {
 
-    let reference = Date(timeIntervalSince1970: 1_780_000_000)  // 2026-05-29 UTC
+    let reference = Date(timeIntervalSince1970: 1_780_000_000)  // 2026-05-28 ~20:26 UTC (a Thursday)
 
     func testExplicitMonthAndYear() {
         let range = DateFilter.unixRange(question: "What was the February 2026 newsletter highlight?",
@@ -156,5 +156,146 @@ final class DateFilterTests: XCTestCase {
     func testNoDateMention() {
         XCTAssertNil(DateFilter.unixRange(question: "What did the vendor say about pricing?",
                                           now: reference))
+    }
+
+    func testISODate() {
+        let range = DateFilter.unixRange(question: "what emails did i get during on 2026-06-10?",
+                                         now: reference)
+        XCTAssertNotNil(range)
+        XCTAssertEqual(range, 1_781_049_600...1_781_136_000 - 1)
+    }
+
+    func testDottedGermanDate() {
+        let range = DateFilter.unixRange(question: "was bekam ich am 10.06.2026?", now: reference)
+        XCTAssertNotNil(range)
+        XCTAssertEqual(range, 1_781_049_600...1_781_136_000 - 1)
+    }
+
+    func testFirstWeekOfMonth() {
+        let range = DateFilter.unixRange(question: "what emails did i get during the first week of June this year?",
+                                         now: reference)
+        XCTAssertNotNil(range)
+        XCTAssertEqual(range, 1_780_272_000...1_780_876_800 - 1)  // June 1 - June 7 (exclusive end)
+    }
+
+    func testLastWeekOfMonth() {
+        let range = DateFilter.unixRange(question: "what did I get the last week of June 2026?",
+                                         now: reference)
+        XCTAssertNotNil(range)
+        XCTAssertEqual(range, 1_782_259_200...1_782_864_000 - 1)  // June 24 - June 30 (exclusive end)
+    }
+
+    // Reference is 2026-05-28. March has already happened this year: the
+    // bare-month heuristic alone would already say "March 2026". "last year"
+    // must override that to March 2025.
+    func testMonthWithExplicitLastYear() {
+        let range = DateFilter.unixRange(question: "the March newsletter last year", now: reference)
+        XCTAssertNotNil(range)
+        XCTAssertTrue(range!.contains(1_741_996_800))   // 2025-03-15
+        XCTAssertFalse(range!.contains(1_773_532_800))  // 2026-03-15
+    }
+
+    // December hasn't happened yet this year: the bare-month heuristic alone
+    // would say "December 2025". "this year" must override that to December 2026.
+    func testMonthWithExplicitThisYear() {
+        let range = DateFilter.unixRange(question: "the December summary this year", now: reference)
+        XCTAssertNotNil(range)
+        XCTAssertTrue(range!.contains(1_797_292_800))   // 2026-12-15
+        XCTAssertFalse(range!.contains(1_765_756_800))  // 2025-12-15
+    }
+
+    func testBareThisYear() {
+        let range = DateFilter.unixRange(question: "what emails did I get this year?", now: reference)
+        XCTAssertNotNil(range)
+        XCTAssertTrue(range!.contains(1_767_225_600))    // 2026-01-01
+        XCTAssertFalse(range!.contains(1_735_689_600))   // 2025-01-01
+    }
+
+    func testBareLastYear() {
+        let range = DateFilter.unixRange(question: "what emails did I get last year?", now: reference)
+        XCTAssertNotNil(range)
+        XCTAssertTrue(range!.contains(1_735_689_600))    // 2025-01-01
+        XCTAssertFalse(range!.contains(1_767_225_600))   // 2026-01-01
+    }
+
+    func testGermanLastYearPhrase() {
+        let range = DateFilter.unixRange(question: "was bekam ich im letzten Jahr?", now: reference)
+        XCTAssertNotNil(range)
+        XCTAssertTrue(range!.contains(1_735_689_600))    // 2025-01-01
+    }
+
+    // Reference is 2026-05-28.
+    func testPastFourMonths() {
+        let range = DateFilter.unixRange(question: "what did I get over the past four months?",
+                                         now: reference)
+        XCTAssertNotNil(range)
+        XCTAssertTrue(range!.contains(1_773_532_800))    // 2026-03-15, inside the window
+        XCTAssertFalse(range!.contains(1_761_955_200))   // 2025-11-01, before it
+    }
+
+    func testPast15Months() {
+        let range = DateFilter.unixRange(question: "what did I get in the past 15 months?",
+                                         now: reference)
+        XCTAssertNotNil(range)
+        XCTAssertTrue(range!.contains(1_752_537_600))    // 2025-07-15, inside the window
+        XCTAssertFalse(range!.contains(1_725_148_800))   // 2024-09-01, before it
+    }
+
+    // Multi-year window: must span across calendar-year boundaries, not just
+    // scope to a single year.
+    func testPastTwoYears() {
+        let range = DateFilter.unixRange(question: "what emails came in over the past 2 years?",
+                                         now: reference)
+        XCTAssertNotNil(range)
+        XCTAssertTrue(range!.contains(1_719_792_000))    // 2024-07-01
+        XCTAssertTrue(range!.contains(1_751_328_000))    // 2025-07-01
+        XCTAssertFalse(range!.contains(1_685_577_600))   // 2023-06-01, before it
+    }
+
+    func testLastNMonthsAlsoWorks() {
+        // "last" (not just "past") is accepted when a count is present.
+        let range = DateFilter.unixRange(question: "the last 3 months", now: reference)
+        XCTAssertNotNil(range)
+        XCTAssertTrue(range!.contains(1_773_532_800))    // 2026-03-15
+    }
+
+    func testBareLastYearStillMeansCalendarYearNotRollingWindow() {
+        // Regression guard: adding "past N units" parsing must not change the
+        // already-shipped meaning of bare "last year" (the previous calendar
+        // year), which is a distinct feature from a rolling 12-month window.
+        let range = DateFilter.unixRange(question: "what emails did I get last year?", now: reference)
+        XCTAssertNotNil(range)
+        XCTAssertTrue(range!.contains(1_735_689_600))    // 2025-01-01, would be excluded by a rolling window
+    }
+
+    // Reference is 2026-05-28, a Thursday.
+    func testYesterday() {
+        let range = DateFilter.unixRange(question: "what emails did I get yesterday?", now: reference)
+        XCTAssertNotNil(range)
+        XCTAssertEqual(range, 1_779_840_000...1_779_926_400 - 1)  // 2026-05-27
+    }
+
+    func testLastWeekday() {
+        let range = DateFilter.unixRange(question: "what did I get last Tuesday?", now: reference)
+        XCTAssertNotNil(range)
+        XCTAssertEqual(range, 1_779_753_600...1_779_840_000 - 1)  // 2026-05-26
+    }
+
+    func testBareWeekdayMeansMostRecentPastOccurrence() {
+        let range = DateFilter.unixRange(question: "anything from Tuesday?", now: reference)
+        XCTAssertNotNil(range)
+        XCTAssertEqual(range, 1_779_753_600...1_779_840_000 - 1)  // 2026-05-26
+    }
+
+    // Reproduces the reported bug: a question naming two distinct days must
+    // scope to their combined span, not silently pick (or hallucinate) one.
+    func testMultipleDistinctDaysUnionTheirSpan() {
+        let range = DateFilter.unixRange(question: "emails i got yesterday? or last tuesday?",
+                                         now: reference)
+        XCTAssertNotNil(range)
+        XCTAssertTrue(range!.contains(1_779_753_600))     // last Tuesday 2026-05-26
+        XCTAssertTrue(range!.contains(1_779_840_000))     // yesterday 2026-05-27
+        XCTAssertFalse(range!.contains(1_779_667_200))    // Monday 2026-05-25, outside both
+        XCTAssertFalse(range!.contains(1_779_926_400))    // today 2026-05-28, outside both
     }
 }
