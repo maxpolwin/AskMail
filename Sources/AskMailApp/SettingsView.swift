@@ -196,9 +196,19 @@ struct SettingsView: View {
                 if !engine.message.isEmpty {
                     Text(engine.message).font(.caption).foregroundStyle(.secondary)
                 }
-                Text("AskMail runs models locally with Ollama. Your email never leaves this Mac.")
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
+                // Only true on the local provider — an API provider receives the
+                // query and matching email excerpts, so say so plainly.
+                if settings.provider == .ollamaLocal {
+                    Label("AskMail runs models locally with Ollama. Your email never leaves this Mac.",
+                          systemImage: "lock")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                } else {
+                    Label("Indexing and search stay on this Mac, but \(providerName) writes the answer \u{2014} so your question and the matching email excerpts are sent to it. Choose Ollama (local) to keep everything on-device.",
+                          systemImage: "arrow.up.forward")
+                        .font(.caption)
+                        .foregroundStyle(.orange)
+                }
 
                 Divider()
 
@@ -491,6 +501,15 @@ struct SettingsView: View {
                     .font(.caption)
                     .foregroundStyle(Theme.accent)
             }
+        }
+    }
+
+    /// Human-readable name of the selected provider, for the privacy note.
+    private var providerName: String {
+        switch settings.provider {
+        case .ollamaLocal: return "Ollama (local)"
+        case .ollamaCloud: return "Ollama Cloud"
+        case .mistral: return "Mistral"
         }
     }
 
