@@ -67,4 +67,25 @@ final class EmlxLocatorTests: XCTestCase {
         XCTAssertEqual(found, expected,
                        "scan must return only Inbox and Sent ROWIDs")
     }
+
+    // `index` is Draft-Modus's ROWID -> URL lookup for classification; a
+    // still-downloading `.partial.emlx` winning over the complete file would
+    // mean classifying against a truncated body/missing headers.
+    func testIndexPrefersFullFileOverPartialRegardlessOfEnumerationOrder() throws {
+        let root = URL(fileURLWithPath: NSTemporaryDirectory())
+            .appendingPathComponent("emlx-index-\(UUID().uuidString)", isDirectory: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let messagesDir = root.appendingPathComponent("INBOX.mbox/A/Data/0/0/Messages", isDirectory: true)
+        try FileManager.default.createDirectory(at: messagesDir, withIntermediateDirectories: true)
+
+        // Both a partial and a full file exist for the same ROWID (Mail
+        // mid-download) -- full must win no matter which the enumerator
+        // happens to write/visit first.
+        try Data("partial".utf8).write(to: messagesDir.appendingPathComponent("1001.partial.emlx"))
+        try Data("full".utf8).write(to: messagesDir.appendingPathComponent("1001.emlx"))
+
+        let index = EmlxLocator.index(accountDirectory: root)
+        let resolved = try XCTUnwrap(index[1001])
+        XCTAssertEqual(resolved.lastPathComponent, "1001.emlx", "the full file must always win over its partial sibling")
+    }
 }

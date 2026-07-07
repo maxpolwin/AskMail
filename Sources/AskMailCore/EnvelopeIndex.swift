@@ -123,7 +123,11 @@ public enum EmlxLocator {
     /// `…/<account>/INBOX.mbox/<uuid>/Data/…/Messages/1.emlx`. Submailboxes nest
     /// (`Archive.mbox/2023.mbox/…`), so the first `.mbox` component is always the
     /// account's top-level folder. Returns nil for a file under no `.mbox` folder.
-    static func topLevelMailbox(of file: URL) -> String? {
+    /// `public` (unlike `isIndexed`/`indexedMailboxNames`): Draft-Modus
+    /// (`Sources/AskMailApp`) needs a *stricter* inbox-only filter than
+    /// `indexedMailboxNames` (which also allows Sent) — a reply is never
+    /// drafted for the user's own outgoing mail.
+    public static func topLevelMailbox(of file: URL) -> String? {
         for component in file.pathComponents where component.hasSuffix(".mbox") {
             return String(component.dropLast(5))  // drop ".mbox"
         }
@@ -170,8 +174,15 @@ public enum EmlxLocator {
     }
 
     /// Scans once and returns a map ROWID -> file URL.
+    /// A full file always wins over its `.partial` sibling for the same
+    /// ROWID, regardless of enumeration order — mirrors `scan`'s dedup rule.
+    /// (Draft-Modus's classification path reads whatever this returns
+    /// directly, so a still-downloading partial file winning here — as an
+    /// earlier version allowed — could mean classifying against a truncated
+    /// body/missing headers.)
     public static func index(accountDirectory: URL) -> [Int64: URL] {
         var map: [Int64: URL] = [:]
+        var isPartialByID: [Int64: Bool] = [:]
         let enumerator = FileManager.default.enumerator(
             at: accountDirectory,
             includingPropertiesForKeys: [.isRegularFileKey],
@@ -180,12 +191,16 @@ public enum EmlxLocator {
         while let item = enumerator?.nextObject() as? URL {
             let name = item.lastPathComponent
             guard name.hasSuffix(".emlx") else { continue }
+            let isPartial = name.hasSuffix(".partial.emlx")
             let stem = name
                 .replacingOccurrences(of: ".partial.emlx", with: "")
                 .replacingOccurrences(of: ".emlx", with: "")
-            if let rowID = Int64(stem) {
-                map[rowID] = item
-            }
+            guard let rowID = Int64(stem) else { continue }
+            // Already have a full file recorded for this ROWID: never let a
+            // partial overwrite it, whichever order the enumerator visits them.
+            if isPartial, isPartialByID[rowID] == false { continue }
+            map[rowID] = item
+            isPartialByID[rowID] = isPartial
         }
         return map
     }

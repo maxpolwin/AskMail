@@ -11,6 +11,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private var settingsWindow: NSWindow?
     private var askMenuItem: NSMenuItem?
     private var scheduler: VectorizationScheduler?
+    private var draftScheduler: DraftScheduler?
     private var cancellables = Set<AnyCancellable>()
 
     func applicationDidFinishLaunching(_ notification: Notification) {
@@ -43,6 +44,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         let scheduler = VectorizationScheduler()
         scheduler.start()
         self.scheduler = scheduler
+
+        // Draft-Modus's background scheduler. start() is unconditional, same
+        // as VectorizationScheduler's — it stays fully inert until
+        // SettingsStore.draftModeEnabled is switched on in Settings.
+        let draftScheduler = DraftScheduler()
+        draftScheduler.start()
+        self.draftScheduler = draftScheduler
     }
 
     /// Installs a minimal main menu carrying the standard Edit commands.

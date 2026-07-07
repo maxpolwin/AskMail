@@ -22,17 +22,11 @@ final class DraftPipelineIntegrationTests: XCTestCase {
         return InProcessEmailParser.ingestable(from: parsed)
     }
 
-    /// Reconstructs the generic header pairs `NewsletterClassifier.classify`
-    /// expects from `IngestableEmail`'s named fields — the same small adapter
-    /// a later phase's `DraftEngine` would need, since `IngestableEmail`
-    /// deliberately carries only these specific fields, not a raw header list.
+    /// `NewsletterClassifier.headers(from:)` (added for Phase 2's `DraftJobProcessor`,
+    /// which needs the identical reconstruction) — kept as a thin local alias
+    /// so this file's existing call sites don't need renaming.
     func classifierHeaders(_ email: IngestableEmail) -> [(String, String)] {
-        [
-            ("List-Unsubscribe", email.listUnsubscribe ?? ""),
-            ("List-Id", email.listId ?? ""),
-            ("Precedence", email.precedence ?? ""),
-            ("Auto-Submitted", email.autoSubmitted ?? ""),
-        ]
+        NewsletterClassifier.headers(from: email)
     }
 
     // MARK: Fixtures (in-memory, not committed to Tests/Fixtures)

@@ -83,6 +83,16 @@ final class SettingsStore: ObservableObject {
     @Published var highContrastEnabled: Bool {
         didSet { defaults.set(highContrastEnabled, forKey: "highContrastEnabled") }
     }
+    /// Draft-Modus master switch. Off by default — when off, `DraftScheduler`
+    /// runs nothing at all (no detection, no purge, no anything).
+    @Published var draftModeEnabled: Bool {
+        didSet { defaults.set(draftModeEnabled, forKey: "draftModeEnabled") }
+    }
+    /// Off by default (FR-5 parity): a scheduled draft tick on battery is
+    /// skipped, not queued, unless the user explicitly opts in here.
+    @Published var draftAllowOnBattery: Bool {
+        didSet { defaults.set(draftAllowOnBattery, forKey: "draftAllowOnBattery") }
+    }
 
     private init() {
         provider = ProviderChoice(rawValue: defaults.string(forKey: "provider") ?? "") ?? .ollamaLocal
@@ -119,6 +129,8 @@ final class SettingsStore: ObservableObject {
         hotkeyKeyLabel = defaults.string(forKey: "hotkeyKeyLabel") ?? ShortcutSymbols.defaultKeyLabel
         speakAnswerEnabled = defaults.bool(forKey: "speakAnswerEnabled")
         highContrastEnabled = defaults.bool(forKey: "highContrastEnabled")
+        draftModeEnabled = defaults.bool(forKey: "draftModeEnabled")
+        draftAllowOnBattery = defaults.bool(forKey: "draftAllowOnBattery")
 
         // Migrate the pre-picker path setting: an account directory's last path
         // component is its id. (didSet doesn't fire during init, so persist here.)
@@ -160,5 +172,15 @@ final class SettingsStore: ObservableObject {
         let directory = support.appendingPathComponent("AskMail", isDirectory: true)
         try? FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
         return directory.appendingPathComponent("askmail.db").path
+    }
+
+    /// The separate Draft-Modus database — physically decoupled from
+    /// `databasePath`'s `askmail.db` (same directory, different file).
+    static var draftsDatabasePath: String {
+        let support = FileManager.default.urls(for: .applicationSupportDirectory,
+                                               in: .userDomainMask)[0]
+        let directory = support.appendingPathComponent("AskMail", isDirectory: true)
+        try? FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        return directory.appendingPathComponent("drafts.db").path
     }
 }
