@@ -268,11 +268,23 @@ public final class MailboxIngestor {
             cursor = end
         }
 
+        // Draft-Modus §3: resolved for every ingested message (not just a
+        // future opt-in path) since thread reconstruction needs full history
+        // to work, and this is the one ingest call site both the hourly
+        // Vectorizer and any future draft-triggered ingest share.
+        let threadID = try ThreadResolver.resolveThread(messageID: email.messageID,
+                                                        inReplyTo: email.inReplyTo,
+                                                        references: email.references,
+                                                        store: store)
         let pk = try store.upsertMessage(messageID: email.messageID,
                                          account: account,
                                          subject: email.subject,
                                          sender: email.sender,
                                          originalSender: email.originalSender,
+                                         inReplyTo: email.inReplyTo,
+                                         referencesIDs: email.references,
+                                         threadID: threadID,
+                                         bodyText: email.bodyText,
                                          dateUnix: email.dateUnix)
         let rows = pieces.enumerated().map { index, piece in
             (source: piece.source,

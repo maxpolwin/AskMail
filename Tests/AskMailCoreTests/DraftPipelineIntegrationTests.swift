@@ -1,0 +1,216 @@
+import XCTest
+@testable import AskMailCore
+
+/// End-to-end Phase 1 integration test: synthetic .emlx-shaped messages
+/// (no live Mail.app) chained through parse -> ingest (thread resolution
+/// included) -> newsletter gate -> thread/grounding retrieval -> assemble ->
+/// a stub LLM -> DraftStore, with no `DraftEngine` (a later phase) driving
+/// it — the chain is called directly, matching the Phase 1 plan.
+final class DraftPipelineIntegrationTests: XCTestCase {
+
+    /// Builds the on-disk `.emlx` byte shape (byte-count line + raw RFC 5322
+    /// message) that `EmlxParser.parse(data:)` expects. No trailing plist is
+    /// needed: the parser only reads exactly the declared byte count and
+    /// ignores anything after it.
+    func emlxData(_ message: String) -> Data {
+        let messageData = Data(message.utf8)
+        return Data("\(messageData.count)\n".utf8) + messageData
+    }
+
+    func ingestableEmail(_ raw: String) throws -> IngestableEmail {
+        let parsed = try EmlxParser.parse(data: emlxData(raw))
+        return InProcessEmailParser.ingestable(from: parsed)
+    }
+
+    /// Reconstructs the generic header pairs `NewsletterClassifier.classify`
+    /// expects from `IngestableEmail`'s named fields — the same small adapter
+    /// a later phase's `DraftEngine` would need, since `IngestableEmail`
+    /// deliberately carries only these specific fields, not a raw header list.
+    func classifierHeaders(_ email: IngestableEmail) -> [(String, String)] {
+        [
+            ("List-Unsubscribe", email.listUnsubscribe ?? ""),
+            ("List-Id", email.listId ?? ""),
+            ("Precedence", email.precedence ?? ""),
+            ("Auto-Submitted", email.autoSubmitted ?? ""),
+        ]
+    }
+
+    // MARK: Fixtures (in-memory, not committed to Tests/Fixtures)
+
+    let rootMessage = """
+    From: Alice <alice@example.com>
+    To: Max <max@example.com>
+    Subject: Project Nightingale timeline
+    Date: Mon, 02 Mar 2026 09:00:00 +0100
+    Message-ID: <thread-root@example.com>
+    Content-Type: text/plain; charset=utf-8
+
+    Hi Max,
+
+    Can we push the Nightingale deadline to next Friday? We're waiting on
+    one more sign-off from legal.
+
+    Alice
+    """
+
+    let replyMessage = """
+    From: Max <max@example.com>
+    To: Alice <alice@example.com>
+    Subject: Re: Project Nightingale timeline
+    Date: Mon, 02 Mar 2026 10:30:00 +0100
+    Message-ID: <thread-reply1@example.com>
+    In-Reply-To: <thread-root@example.com>
+    References: <thread-root@example.com>
+    Content-Type: text/plain; charset=utf-8
+
+    Hi Alice,
+
+    Friday works on my end. Let's confirm once legal signs off.
+
+    Max
+    """
+
+    let latestMessage = """
+    From: Alice <alice@example.com>
+    To: Max <max@example.com>
+    Subject: Re: Project Nightingale timeline
+    Date: Wed, 04 Mar 2026 14:00:00 +0100
+    Message-ID: <thread-reply2@example.com>
+    In-Reply-To: <thread-reply1@example.com>
+    References: <thread-root@example.com> <thread-reply1@example.com>
+    Content-Type: text/plain; charset=utf-8
+
+    Legal signed off. Can you confirm Friday at 3pm still works, and send
+    the updated deck beforehand?
+
+    Alice
+    """
+
+    /// An unrelated, already-indexed email sharing vocabulary with
+    /// `latestMessage` ("deck", "Friday") — proves grounding retrieval pulls
+    /// in real mailbox context beyond the thread itself.
+    let groundingMessage = """
+    From: Alice <alice@example.com>
+    To: Max <max@example.com>
+    Subject: Nightingale deck v3
+    Date: Fri, 20 Feb 2026 09:00:00 +0100
+    Message-ID: <deck-context@example.com>
+    Content-Type: text/plain; charset=utf-8
+
+    Attached the latest Nightingale deck v3 for Friday review. Let me know
+    if the numbers on slide 5 need updating.
+    """
+
+    let newsletterMessage = """
+    From: Updates <updates@newsletter.example>
+    To: Max <max@example.com>
+    Subject: This week in Acme
+    Date: Tue, 03 Mar 2026 08:00:00 +0100
+    Message-ID: <newsletter-0001@newsletter.example>
+    List-Unsubscribe: <mailto:unsub@newsletter.example>
+    Content-Type: text/plain; charset=utf-8
+
+    Here's what's new this week at Acme. Click below to unsubscribe.
+    """
+
+    // MARK: Happy path — personal thread produces a ready draft
+
+    func testFullChainProducesReadyDraft() async throws {
+        let store = try SQLiteStore.inMemory()
+        let embedder = StubEmbedder()
+        let ingestor = MailboxIngestor(store: store, embedder: embedder, account: "test", log: { _, _ in })
+
+        // Ingest oldest-first so thread resolution joins forward, not via merge
+        // (out-of-order arrival is ThreadResolverTests' concern, not this one's).
+        let root = try ingestableEmail(rootMessage)
+        let reply = try ingestableEmail(replyMessage)
+        let latest = try ingestableEmail(latestMessage)
+        let grounding = try ingestableEmail(groundingMessage)
+        for email in [root, reply, latest, grounding] {
+            try await ingestor.ingest(email: email)
+        }
+
+        // Newsletter gate.
+        XCTAssertFalse(NewsletterClassifier.isAutoGenerated(headers: classifierHeaders(latest)))
+        let verdict = await NewsletterClassifier.classify(
+            headers: classifierHeaders(latest), sender: latest.sender, bodyText: latest.bodyText,
+            hasPriorSentCorrespondence: false, llmFallback: nil)
+        guard case .personal = verdict else {
+            return XCTFail("expected the real correspondence to classify as personal, got \(verdict)")
+        }
+
+        // Thread + grounding retrieval.
+        guard let resolved = try store.messageByMessageID(latest.messageID), let threadID = resolved.threadID else {
+            return XCTFail("latest message must have a resolved thread id")
+        }
+        let thread = try store.threadMessages(threadID: threadID)
+        XCTAssertEqual(thread.map(\.messageID), ["thread-root@example.com", "thread-reply1@example.com", "thread-reply2@example.com"])
+
+        let threadMessageIDs = Set(thread.map(\.messageID))
+        let queryEmbedding = try await embedder.embed([latest.bodyText]).first ?? []
+        let groundingChunks = try Retriever.hybridRetrieve(
+            embedding: queryEmbedding, keywordQuery: latest.bodyText, store: store,
+            vectorTopN: 10, keywordTopN: 10, relevanceFloor: -1, excludingMessageIDs: threadMessageIDs)
+        XCTAssertTrue(groundingChunks.contains { $0.messageID == "deck-context@example.com" },
+                     "grounding must surface the unrelated deck email sharing vocabulary with the latest message")
+        XCTAssertFalse(groundingChunks.contains { threadMessageIDs.contains($0.messageID) },
+                       "grounding must never re-surface the thread's own messages")
+
+        // Assemble.
+        let assembled = DraftAssembler().assemble(thread: thread, grounding: groundingChunks)
+        XCTAssertTrue(assembled.user.contains("Legal signed off."))
+        XCTAssertTrue(assembled.user.contains("Nightingale deck v3") || assembled.user.contains("slide 5"))
+
+        // Stub LLM.
+        let stub = StubChatProvider(name: "stub-local", tokens: ["Hi Alice, ", "Friday at 3pm works \u{2014} deck attached."])
+        var draftText = ""
+        for try await token in stub.stream(ChatRequest(system: assembled.system, user: assembled.user)) {
+            draftText += token
+        }
+        XCTAssertEqual(draftText, "Hi Alice, Friday at 3pm works \u{2014} deck attached.")
+
+        // Persist to the separate drafts.db.
+        let draftStore = try DraftStore.inMemory()
+        try draftStore.insertDraft(threadID: threadID, latestMessageID: latest.messageID, sender: latest.sender,
+                                   subject: latest.subject, draftText: draftText, generatedAt: 1_772_000_000,
+                                   status: .ready)
+
+        let saved = try XCTUnwrap(try draftStore.latestDraft(threadID: threadID))
+        XCTAssertEqual(saved.status, .ready)
+        XCTAssertEqual(saved.latestMessageID, "thread-reply2@example.com")
+        XCTAssertEqual(saved.draftText, draftText)
+        XCTAssertEqual(saved.subject, "Re: Project Nightingale timeline")
+    }
+
+    // MARK: Newsletter gate stops the chain before any LLM call
+
+    func testNewsletterGateStopsChainBeforeLLMCall() async throws {
+        let store = try SQLiteStore.inMemory()
+        let ingestor = MailboxIngestor(store: store, embedder: StubEmbedder(), account: "test", log: { _, _ in })
+        let newsletter = try ingestableEmail(newsletterMessage)
+        try await ingestor.ingest(email: newsletter)
+
+        let calledLLM = TestFlag()
+        let stub = StubChatProvider(name: "stub-local", tokens: ["should never run"], onStart: { calledLLM.mark() })
+
+        XCTAssertFalse(NewsletterClassifier.isAutoGenerated(headers: classifierHeaders(newsletter)))
+        let verdict = await NewsletterClassifier.classify(
+            headers: classifierHeaders(newsletter), sender: newsletter.sender, bodyText: newsletter.bodyText,
+            hasPriorSentCorrespondence: false, llmFallback: nil)
+        guard case .newsletter = verdict else {
+            return XCTFail("expected newsletter, got \(verdict)")
+        }
+        // Mirrors the early-exit a real caller (a later phase's DraftEngine)
+        // takes on a newsletter verdict: never reaches drafting or the LLM.
+        XCTAssertFalse(calledLLM.value, "the stub LLM must never have been started")
+    }
+}
+
+/// Thread-safe boolean latch, mirroring `QueryFlowTests.swift`'s private
+/// helper of the same shape (kept file-local here rather than shared, since
+/// that one is declared `private` to its file).
+private final class TestFlag: @unchecked Sendable {
+    private let lock = NSLock()
+    private(set) var value = false
+    func mark() { lock.lock(); value = true; lock.unlock() }
+}

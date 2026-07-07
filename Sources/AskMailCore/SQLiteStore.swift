@@ -36,7 +36,11 @@ public final class SQLiteStore {
         db = opened
         try execute("PRAGMA journal_mode=WAL")
         try execute("PRAGMA foreign_keys=ON")
+        try execute("PRAGMA busy_timeout=5000")
         try migrate()
+        if path != ":memory:" {
+            FileHardening.lockDown(fileURL: URL(fileURLWithPath: path))
+        }
     }
 
     public static func inMemory() throws -> SQLiteStore {
@@ -66,6 +70,24 @@ public final class SQLiteStore {
         if !(try columnExists("messages", "original_sender")) {
             try execute("ALTER TABLE messages ADD COLUMN original_sender TEXT")
         }
+        // Draft-Modus thread linking (Phase 1). in_reply_to/references_ids are
+        // space-joined, bracket-stripped Message-ID tokens (same normalization
+        // as message_id itself, so they're directly comparable). body_text is
+        // the verbatim cleaned body — not reconstructed from `chunks`, which
+        // are overlapping retrieval fragments unsuitable for "the full exchange".
+        if !(try columnExists("messages", "in_reply_to")) {
+            try execute("ALTER TABLE messages ADD COLUMN in_reply_to TEXT")
+        }
+        if !(try columnExists("messages", "references_ids")) {
+            try execute("ALTER TABLE messages ADD COLUMN references_ids TEXT")
+        }
+        if !(try columnExists("messages", "thread_id")) {
+            try execute("ALTER TABLE messages ADD COLUMN thread_id TEXT")
+        }
+        if !(try columnExists("messages", "body_text")) {
+            try execute("ALTER TABLE messages ADD COLUMN body_text TEXT")
+        }
+        try execute("CREATE INDEX IF NOT EXISTS idx_messages_thread ON messages(thread_id)")
         try execute("""
         CREATE TABLE IF NOT EXISTS chunks(
           id INTEGER PRIMARY KEY,
@@ -124,30 +146,42 @@ public final class SQLiteStore {
     /// Inserts or updates a message row; returns its primary key.
     /// `originalSender` is the forwarded message's embedded original author
     /// (`ForwardedEmail.detectOriginalSender`), nil for non-forwarded mail.
+    /// `inReplyTo`/`referencesIDs` are bracket-stripped Message-ID tokens (see
+    /// `ThreadResolver`); `threadID` is the resolved thread root's message id;
+    /// `bodyText` is the verbatim cleaned body for thread reconstruction.
     @discardableResult
     public func upsertMessage(messageID: String, account: String, subject: String,
-                              sender: String, originalSender: String? = nil, dateUnix: Int64) throws -> Int64 {
+                              sender: String, originalSender: String? = nil,
+                              inReplyTo: String? = nil, referencesIDs: [String] = [],
+                              threadID: String? = nil, bodyText: String? = nil,
+                              dateUnix: Int64) throws -> Int64 {
         lock.lock(); defer { lock.unlock() }
+        let referencesJoined = referencesIDs.isEmpty ? nil : referencesIDs.joined(separator: " ")
         try run("""
-        INSERT INTO messages(message_id, account, subject, sender, original_sender, date_unix)
-        VALUES (?, ?, ?, ?, ?, ?)
+        INSERT INTO messages(message_id, account, subject, sender, original_sender,
+                             in_reply_to, references_ids, thread_id, body_text, date_unix)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         ON CONFLICT(message_id) DO UPDATE SET
           account = excluded.account,
           subject = excluded.subject,
           sender = excluded.sender,
           original_sender = excluded.original_sender,
+          in_reply_to = excluded.in_reply_to,
+          references_ids = excluded.references_ids,
+          thread_id = excluded.thread_id,
+          body_text = excluded.body_text,
           date_unix = excluded.date_unix
         """) { statement in
             bind(statement, 1, messageID)
             bind(statement, 2, account)
             bind(statement, 3, subject)
             bind(statement, 4, sender)
-            if let originalSender {
-                bind(statement, 5, originalSender)
-            } else {
-                sqlite3_bind_null(statement, 5)
-            }
-            sqlite3_bind_int64(statement, 6, dateUnix)
+            bindOptional(statement, 5, originalSender)
+            bindOptional(statement, 6, inReplyTo)
+            bindOptional(statement, 7, referencesJoined)
+            bindOptional(statement, 8, threadID)
+            bindOptional(statement, 9, bodyText)
+            sqlite3_bind_int64(statement, 10, dateUnix)
         }
         var pk: Int64 = 0
         try query("SELECT pk FROM messages WHERE message_id = ?") { statement in
@@ -156,6 +190,81 @@ public final class SQLiteStore {
             pk = sqlite3_column_int64(statement, 0)
         }
         return pk
+    }
+
+    // MARK: Thread linking (Draft-Modus §3)
+
+    /// A message's primary key and resolved thread id (nil if never resolved
+    /// — shouldn't happen post-ingest, but `ThreadResolver` treats it
+    /// defensively as "no thread info yet").
+    public func messageByMessageID(_ id: String) throws -> (pk: Int64, threadID: String?)? {
+        lock.lock(); defer { lock.unlock() }
+        var result: (Int64, String?)?
+        try query("SELECT pk, thread_id FROM messages WHERE message_id = ?") { statement in
+            bind(statement, 1, id)
+        } row: { statement in
+            result = (sqlite3_column_int64(statement, 0), nullableColumn(statement, 1))
+        }
+        return result
+    }
+
+    /// Messages that already point at `referencingMessageID` via their own
+    /// `in_reply_to`/`references_ids` — used to detect out-of-order arrival
+    /// (a reply ingested before its parent). Small scan filtered in Swift: the
+    /// Inbox/Sent-only scope keeps volumes modest, and exact-token containment
+    /// against a space-joined column isn't reliably expressible as SQL `LIKE`.
+    public func candidateReferencers(referencingMessageID: String) throws -> [(pk: Int64, threadID: String, inReplyTo: String?, referencesIDs: [String])] {
+        lock.lock(); defer { lock.unlock() }
+        var results: [(Int64, String, String?, [String])] = []
+        try query("""
+        SELECT pk, thread_id, in_reply_to, references_ids FROM messages
+        WHERE thread_id IS NOT NULL AND (in_reply_to IS NOT NULL OR references_ids IS NOT NULL)
+        """) { _ in
+        } row: { statement in
+            let threadID = nullableColumn(statement, 1)
+            guard let threadID else { return }
+            let inReplyTo = nullableColumn(statement, 2)
+            let references = nullableColumn(statement, 3)?.split(separator: " ").map(String.init) ?? []
+            if inReplyTo == referencingMessageID || references.contains(referencingMessageID) {
+                results.append((sqlite3_column_int64(statement, 0), threadID, inReplyTo, references))
+            }
+        }
+        return results
+    }
+
+    /// Reassigns every message in one thread group to another — the
+    /// out-of-order-arrival merge (`ThreadResolver`).
+    public func mergeThreads(from: String, to: String) throws {
+        guard from != to else { return }
+        lock.lock(); defer { lock.unlock() }
+        try run("UPDATE messages SET thread_id = ? WHERE thread_id = ?") { statement in
+            bind(statement, 1, to)
+            bind(statement, 2, from)
+        }
+    }
+
+    /// A thread's messages oldest-first, capped at `limit` — takes the most
+    /// recent `limit` by date (so the newest message is always included) and
+    /// reverses to chronological order, bounding prompt size for `DraftAssembler`.
+    public func threadMessages(threadID: String, limit: Int = 20) throws -> [ThreadMessage] {
+        lock.lock(); defer { lock.unlock() }
+        var results: [ThreadMessage] = []
+        try query("""
+        SELECT message_id, sender, date_unix, subject, body_text FROM messages
+        WHERE thread_id = ? ORDER BY date_unix DESC LIMIT ?
+        """) { statement in
+            bind(statement, 1, threadID)
+            sqlite3_bind_int(statement, 2, Int32(limit))
+        } row: { statement in
+            results.append(ThreadMessage(
+                messageID: column(statement, 0),
+                sender: column(statement, 1),
+                dateUnix: sqlite3_column_int64(statement, 2),
+                subject: column(statement, 3),
+                bodyText: nullableColumn(statement, 4) ?? ""
+            ))
+        }
+        return results.reversed()
     }
 
     /// Replaces all chunks of a message, keeping re-vectorization idempotent
@@ -525,6 +634,14 @@ public final class SQLiteStore {
 
     private func bind(_ statement: OpaquePointer, _ index: Int32, _ value: String) {
         sqlite3_bind_text(statement, index, value, -1, SQLITE_TRANSIENT)
+    }
+
+    private func bindOptional(_ statement: OpaquePointer, _ index: Int32, _ value: String?) {
+        if let value {
+            bind(statement, index, value)
+        } else {
+            sqlite3_bind_null(statement, index)
+        }
     }
 
     private func column(_ statement: OpaquePointer, _ index: Int32) -> String {

@@ -55,9 +55,17 @@ public enum EmlxParser {
         guard let rawMessageID = root.header("Message-ID") ?? root.header("Message-Id") else {
             throw EmlxParseError.malformed("missing Message-ID")
         }
-        let messageID = rawMessageID
-            .trimmingCharacters(in: .whitespaces)
-            .trimmingCharacters(in: CharacterSet(charactersIn: "<>"))
+        let messageID = normalizeMessageID(rawMessageID)
+
+        // Thread linking (Draft-Modus §3): normalized the same way as
+        // messageID above so `ThreadResolver` can join on plain string
+        // equality against `messages.message_id` — a raw, bracket-included
+        // value here would never match.
+        let inReplyTo = root.header("In-Reply-To").map(normalizeMessageID)
+        let references = (root.header("References") ?? "")
+            .split(whereSeparator: { $0.isWhitespace })
+            .map { normalizeMessageID(String($0)) }
+            .filter { !$0.isEmpty }
 
         var texts: [String] = []
         var pdfs: [PdfAttachment] = []
@@ -80,8 +88,23 @@ public enum EmlxParser {
             date: root.header("Date").flatMap(parseRFC5322Date),
             bodyText: cleanedText,
             pdfAttachments: pdfs,
-            skippedAttachments: skipped
+            skippedAttachments: skipped,
+            inReplyTo: inReplyTo,
+            references: references,
+            listUnsubscribe: root.header("List-Unsubscribe"),
+            listId: root.header("List-Id"),
+            precedence: root.header("Precedence"),
+            autoSubmitted: root.header("Auto-Submitted")
         )
+    }
+
+    /// Trims whitespace and strips the surrounding `<>` from a Message-ID
+    /// (or an In-Reply-To/References token) — the same normalization for
+    /// every Message-ID-shaped value so they compare equal by plain string
+    /// equality, regardless of which header they came from.
+    static func normalizeMessageID(_ raw: String) -> String {
+        raw.trimmingCharacters(in: .whitespaces)
+            .trimmingCharacters(in: CharacterSet(charactersIn: "<>"))
     }
 
     /// Walks the MIME tree collecting body text and PDF attachments.

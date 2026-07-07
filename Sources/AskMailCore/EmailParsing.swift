@@ -37,6 +37,9 @@ public struct InProcessEmailParser: EmailParsing {
                                sender: email.sender, originalSender: email.originalSender,
                                dateUnix: email.dateUnix,
                                bodyText: email.bodyText, pdfAttachments: pdfTexts,
-                               skippedAttachments: email.skippedAttachments)
+                               skippedAttachments: email.skippedAttachments,
+                               inReplyTo: email.inReplyTo, references: email.references,
+                               listUnsubscribe: email.listUnsubscribe, listId: email.listId,
+                               precedence: email.precedence, autoSubmitted: email.autoSubmitted)
     }
 }

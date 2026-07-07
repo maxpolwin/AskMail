@@ -159,24 +159,12 @@ public final class QueryService: @unchecked Sendable {
     func retrieve(question: String, settings: QuerySettings) async throws -> [ContextChunk] {
         let embedding = try await embedder.embed([question]).first ?? []
 
-        let vectorIDs = embedding.isEmpty ? [] : try store.vectorSearch(embedding, topN: Defaults.vectorTopN)
-        let keywordIDs = try store.keywordSearch(question, topN: Defaults.keywordTopN)
-
-        let fused = Fusion.reciprocalRankFusion([vectorIDs, keywordIDs])
-        let aboveFloor = fused.filter { $0.score > settings.relevanceFloor }
-        log("retrieval vector=\(vectorIDs.count) keyword=\(keywordIDs.count) fused=\(fused.count) aboveFloor=\(aboveFloor.count) top=\(aboveFloor.prefix(3).map { "\($0.id):\(String(format: "%.4f", $0.score))" }.joined(separator: ","))", .debug)
         // Rollup only, not a per-item dump: enumerating every dropped chunk's
         // identity would require an extra store round trip for information
         // that's rarely needed, and would bloat RollingLog's bounded buffer.
-        log("retrieval droppedByFloor=\(fused.count - aboveFloor.count) floor=\(settings.relevanceFloor)", .debug)
-
-        let scoreForID = Dictionary(uniqueKeysWithValues: aboveFloor.map { ($0.id, $0.score) })
-        var candidates = try store.chunks(ids: aboveFloor.map(\.id))
-            .map { chunk -> ContextChunk in
-                var scored = chunk
-                scored.score = scoreForID[chunk.chunkID] ?? 0
-                return scored
-            }
+        var candidates = try Retriever.hybridRetrieve(embedding: embedding, keywordQuery: question, store: store,
+                                                       vectorTopN: Defaults.vectorTopN, keywordTopN: Defaults.keywordTopN,
+                                                       relevanceFloor: settings.relevanceFloor, log: log)
 
         // Date-scoped questions filter candidates to the mentioned range
         // (B6 step 5). Semantic/keyword search alone can miss the answer

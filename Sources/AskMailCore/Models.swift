@@ -35,6 +35,16 @@ public struct ParsedEmail: Sendable {
     public var pdfAttachments: [PdfAttachment]
     /// Attachments skipped (e.g. over the size cap), for logging.
     public var skippedAttachments: [String]
+    /// Thread linking (Draft-Modus §3) and newsletter classification (§2)
+    /// headers. `inReplyTo`/`references` are normalized like `messageID`
+    /// (bracket-stripped) via `EmlxParser.normalizeMessageID`, so they compare
+    /// equal to `messages.message_id` by plain string equality.
+    public var inReplyTo: String?
+    public var references: [String] = []
+    public var listUnsubscribe: String?
+    public var listId: String?
+    public var precedence: String?
+    public var autoSubmitted: String?
 
     public var dateUnix: Int64 { Int64(date?.timeIntervalSince1970 ?? 0) }
 }
@@ -71,9 +81,20 @@ public struct IngestableEmail: Sendable, Codable, Equatable {
     public var pdfAttachments: [PdfAttachmentText]
     /// Attachments skipped (e.g. over the size cap), for logging.
     public var skippedAttachments: [String]
+    /// See `ParsedEmail`'s matching properties. All string-only (hardening
+    /// DM-6): this boundary type crosses the H-6 XPC sandbox as JSON, so no
+    /// new field here may ever be binary.
+    public var inReplyTo: String?
+    public var references: [String]
+    public var listUnsubscribe: String?
+    public var listId: String?
+    public var precedence: String?
+    public var autoSubmitted: String?
 
     public init(messageID: String, subject: String, sender: String, originalSender: String? = nil,
-               dateUnix: Int64, bodyText: String, pdfAttachments: [PdfAttachmentText], skippedAttachments: [String]) {
+               dateUnix: Int64, bodyText: String, pdfAttachments: [PdfAttachmentText], skippedAttachments: [String],
+               inReplyTo: String? = nil, references: [String] = [], listUnsubscribe: String? = nil,
+               listId: String? = nil, precedence: String? = nil, autoSubmitted: String? = nil) {
         self.messageID = messageID
         self.subject = subject
         self.sender = sender
@@ -82,6 +103,12 @@ public struct IngestableEmail: Sendable, Codable, Equatable {
         self.bodyText = bodyText
         self.pdfAttachments = pdfAttachments
         self.skippedAttachments = skippedAttachments
+        self.inReplyTo = inReplyTo
+        self.references = references
+        self.listUnsubscribe = listUnsubscribe
+        self.listId = listId
+        self.precedence = precedence
+        self.autoSubmitted = autoSubmitted
     }
 }
 
@@ -148,6 +175,24 @@ public struct SourceRef: Sendable, Equatable {
         self.dateUnix = dateUnix
         self.relevance = relevance
         self.excerpt = excerpt
+    }
+}
+
+/// One message in a resolved thread (`ThreadResolver`/`SQLiteStore.threadMessages`),
+/// oldest-first, for `DraftAssembler`'s thread-context block.
+public struct ThreadMessage: Sendable, Equatable {
+    public var messageID: String
+    public var sender: String
+    public var dateUnix: Int64
+    public var subject: String
+    public var bodyText: String
+
+    public init(messageID: String, sender: String, dateUnix: Int64, subject: String, bodyText: String) {
+        self.messageID = messageID
+        self.sender = sender
+        self.dateUnix = dateUnix
+        self.subject = subject
+        self.bodyText = bodyText
     }
 }
 
