@@ -9,8 +9,8 @@ Draft-Modus is a separate feature from Q&A: it never touches Apple Mail's
 real Drafts folder, stores generated drafts in a separate local database
 (`drafts.db`, `DraftStore`), and is entirely opt-in. This contract governs
 only how a draft's prompt is assembled — not the scheduling, newsletter
-filtering, or macOS integration around it (see the Draft-Modus design plan
-for those).
+filtering, or macOS integration around it (see docs/draft-modus-plan.md for
+those).
 
 ---
 
