@@ -89,6 +89,50 @@ final class StoreTests: XCTestCase {
         XCTAssertEqual(chunks.first?.text.contains("INV-2026-0473"), true)
     }
 
+    // Regression guard for the lock-hold reduction: scoring now happens after
+    // the store's row copy is released, so this pins exact ordering, ties,
+    // and the limit behavior stay byte-identical to the old in-lock scan.
+    func testVectorSearchExactOrderingTiesAndLimit() throws {
+        let store = try SQLiteStore.inMemory()
+        let pk = try store.upsertMessage(messageID: "v@x", account: "acc", subject: "S",
+                                         sender: "s@x", dateUnix: 1)
+        try store.replaceChunks(messagePk: pk, chunks: [
+            (.body, "exact match", [1, 0, 0]),      // cosine 1.0
+            (.body, "tie a", [1, 1, 0]),             // cosine ~0.7071
+            (.body, "tie b", [2, 2, 0]),             // same direction as tie a -> same cosine
+            (.body, "orthogonal", [0, 1, 0]),        // cosine 0.0
+            (.body, "opposite", [-1, 0, 0]),         // cosine -1.0
+        ])
+        let ids = try store.vectorSearch([1, 0, 0], topN: 10)
+        let chunks = try store.chunks(ids: ids)
+        // Exact match first, opposite last; the two ties keep their relative
+        // insertion order (Swift's sort is stable) and both outrank orthogonal.
+        XCTAssertEqual(chunks.map(\.text),
+                       ["exact match", "tie a", "tie b", "orthogonal", "opposite"])
+
+        let limited = try store.vectorSearch([1, 0, 0], topN: 2)
+        let limitedChunks = try store.chunks(ids: limited)
+        XCTAssertEqual(limitedChunks.map(\.text), ["exact match", "tie a"])
+    }
+
+    func testVectorSearchSkipsMismatchedDimensionRows() throws {
+        let store = try SQLiteStore.inMemory()
+        let pk = try store.upsertMessage(messageID: "m@x", account: "acc", subject: "S",
+                                         sender: "s@x", dateUnix: 1)
+        try store.replaceChunks(messagePk: pk, chunks: [
+            (.body, "right dims", [1, 0, 0]),
+            (.body, "wrong dims", [1, 0, 0, 0]),
+        ])
+        let ids = try store.vectorSearch([1, 0, 0], topN: 10)
+        let chunks = try store.chunks(ids: ids)
+        XCTAssertEqual(chunks.map(\.text), ["right dims"])
+    }
+
+    func testCosineMismatchedLengthReturnsZeroWithoutCrashing() {
+        XCTAssertEqual(SQLiteStore.cosine([1, 0, 0], [1, 0]), 0)
+        XCTAssertEqual(SQLiteStore.cosine([], []), 0)
+    }
+
     func testChunksPreservesInputOrder() throws {
         let store = try makePopulatedStore()
         let all = try store.keywordSearch("invoice webinar EUR pricing")

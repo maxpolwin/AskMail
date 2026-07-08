@@ -246,7 +246,9 @@ public final class SQLiteStore {
     /// A thread's messages oldest-first, capped at `limit` — takes the most
     /// recent `limit` by date (so the newest message is always included) and
     /// reverses to chronological order, bounding prompt size for `DraftAssembler`.
-    public func threadMessages(threadID: String, limit: Int = 20) throws -> [ThreadMessage] {
+    /// Default wired to `Defaults.draftThreadMessageLimit` (draft-contract §2)
+    /// so the mandated cap has a single source of truth.
+    public func threadMessages(threadID: String, limit: Int = Defaults.draftThreadMessageLimit) throws -> [ThreadMessage] {
         lock.lock(); defer { lock.unlock() }
         var results: [ThreadMessage] = []
         try query("""
@@ -321,21 +323,31 @@ public final class SQLiteStore {
     /// Vector search, best first. Brute-force exact cosine over all stored
     /// embeddings; see the class note about the sqlite-vec swap-in point.
     public func vectorSearch(_ embedding: [Float], topN: Int = Defaults.vectorTopN) throws -> [Int64] {
-        lock.lock(); defer { lock.unlock() }
+        // Copy (id, embedding) rows out under the lock, then decode/score
+        // after releasing it — the brute-force cosine scan no longer
+        // serializes concurrent ingest for its whole duration (lock-hold
+        // reduction hardening). ~20 MB transient at 6.8k chunks is acceptable.
+        let rows: [(id: Int64, data: Data)] = try {
+            lock.lock(); defer { lock.unlock() }
+            var rows: [(id: Int64, data: Data)] = []
+            try query("SELECT id, embedding FROM chunks WHERE embedding IS NOT NULL") { _ in
+            } row: { statement in
+                let byteCount = Int(sqlite3_column_bytes(statement, 1))
+                guard byteCount > 0, let pointer = sqlite3_column_blob(statement, 1) else { return }
+                rows.append((sqlite3_column_int64(statement, 0), Data(bytes: pointer, count: byteCount)))
+            }
+            return rows
+        }()
+
         var scored: [(id: Int64, score: Double)] = []
         var mismatched = 0
-        try query("SELECT id, embedding FROM chunks WHERE embedding IS NOT NULL") { _ in
-        } row: { statement in
-            let id = sqlite3_column_int64(statement, 0)
-            let byteCount = Int(sqlite3_column_bytes(statement, 1))
-            guard byteCount > 0, let pointer = sqlite3_column_blob(statement, 1) else { return }
-            let data = Data(bytes: pointer, count: byteCount)
-            let stored = Self.floats(from: data)
+        for row in rows {
+            let stored = Self.floats(from: row.data)
             guard stored.count == embedding.count else {
                 mismatched += 1
-                return
+                continue
             }
-            scored.append((id, Self.cosine(embedding, stored)))
+            scored.append((row.id, Self.cosine(embedding, stored)))
         }
         if mismatched > 0 {
             // With the single-model stamp enforced at ingest, this guard is an
@@ -577,6 +589,8 @@ public final class SQLiteStore {
     }
 
     static func cosine(_ a: [Float], _ b: [Float]) -> Double {
+        // Defensive: callers already guard equal lengths, but don't index blindly.
+        guard a.count == b.count, !a.isEmpty else { return 0 }
         var dot = 0.0, normA = 0.0, normB = 0.0
         for index in 0..<a.count {
             let x = Double(a[index]), y = Double(b[index])
