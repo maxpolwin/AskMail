@@ -262,7 +262,18 @@ public enum DraftJobProcessor {
                 relevanceFloor: Defaults.relevanceFloor, excludingMessageIDs: Set(thread.map(\.messageID)),
                 log: { RollingLog.shared.log($0, level: $1) })
 
-            let assembled = DraftAssembler().assemble(thread: thread, grounding: grounding)
+            // Best-effort: a lookup failure (or no learned profile yet) must
+            // never block drafting itself (Phase 3, docs/style-learning-contract.md).
+            // Logged rather than silently swallowed so a persistently-failing
+            // lookup (e.g. a corrupt drafts.db) is diagnosable.
+            let styleGuidance: String?
+            do {
+                styleGuidance = try StyleLearner.guidance(forRecipient: latest.sender, draftStore: draftStore)
+            } catch {
+                RollingLog.shared.log("style guidance lookup failed for \(latest.sender): \(error)", level: .debug)
+                styleGuidance = nil
+            }
+            let assembled = DraftAssembler().assemble(thread: thread, grounding: grounding, styleGuidance: styleGuidance)
             var draftText = ""
             for try await token in chatProvider.stream(ChatRequest(system: assembled.system, user: assembled.user)) {
                 draftText += token

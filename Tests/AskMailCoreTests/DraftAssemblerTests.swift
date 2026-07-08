@@ -67,10 +67,15 @@ final class DraftAssemblerTests: XCTestCase {
     }
 
     func testStyleGuidanceOmittedWhenNilOrEmpty() {
+        // Rule 1's base text legitimately mentions "STYLE GUIDANCE" generically
+        // (docs/draft-contract.md §1) regardless of whether any is supplied, so
+        // check for the appended block's own distinguishing header line instead
+        // of the bare phrase.
+        let marker = "STYLE GUIDANCE (how this user writes"
         let withoutGuidance = DraftAssembler().assemble(thread: makeThread(), grounding: [])
-        XCTAssertFalse(withoutGuidance.system.contains("STYLE GUIDANCE"))
+        XCTAssertFalse(withoutGuidance.system.contains(marker))
         let withEmptyGuidance = DraftAssembler().assemble(thread: makeThread(), grounding: [], styleGuidance: "")
-        XCTAssertFalse(withEmptyGuidance.system.contains("STYLE GUIDANCE"))
+        XCTAssertFalse(withEmptyGuidance.system.contains(marker))
     }
 
     func testEmptyThreadDoesNotCrash() {

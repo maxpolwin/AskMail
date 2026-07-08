@@ -69,6 +69,36 @@ public enum MailHeader {
         return labels.count >= 2 ? String(labels[labels.count - 2]) : host
     }
 
+    /// The bare, lowercased email address from a `From`-style header value
+    /// (`Name <addr@host>` or a bare address) — nil when the value carries no
+    /// `@` address at all (e.g. a display-name-only header). Used to key
+    /// Draft-Modus style-profile scopes (`StyleLearner`) at the most specific
+    /// (address) level.
+    ///
+    /// Unlike `domain(fromSender:)` — which only needs the text after `@` and
+    /// so is naturally immune to leading display-name/bracket junk — this
+    /// needs the local-part too, so a malformed header with an unmatched `<`
+    /// (no closing `>`) can't just fall back to the whole raw string: doing
+    /// so would return `"John <john@example.com"` instead of the bare
+    /// address, producing a garbage scope key. Instead, when no clean
+    /// `<...>` pair is found, this recovers just the contiguous run of
+    /// non-whitespace/non-bracket characters immediately around `@`.
+    public static func address(fromSender sender: String) -> String? {
+        let inner: Substring
+        if let lt = sender.firstIndex(of: "<"),
+           let gt = sender[sender.index(after: lt)...].firstIndex(of: ">") {
+            inner = sender[sender.index(after: lt)..<gt]
+        } else {
+            inner = sender[...]
+        }
+        guard let at = inner.firstIndex(of: "@") else { return nil }
+        let isAddressChar: (Character) -> Bool = { !$0.isWhitespace && $0 != "<" && $0 != ">" }
+        let localPart = inner[..<at].reversed().prefix(while: isAddressChar).reversed()
+        let domainPart = inner[inner.index(after: at)...].prefix(while: isAddressChar)
+        guard !localPart.isEmpty, !domainPart.isEmpty else { return nil }
+        return (String(localPart) + "@" + String(domainPart)).lowercased()
+    }
+
     // MARK: Internals
 
     private static let encodedWord =

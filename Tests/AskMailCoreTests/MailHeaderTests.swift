@@ -44,4 +44,22 @@ final class MailHeaderTests: XCTestCase {
     func testDomainFallsBackToDisplayNameWhenNoAddress() {
         XCTAssertEqual(MailHeader.domain(fromSender: "Internal Memo"), "Internal Memo")
     }
+
+    func testAddressFromAngleAddressIsLowercased() {
+        XCTAssertEqual(MailHeader.address(fromSender: "Alice Smith <Alice@Example.COM>"), "alice@example.com")
+    }
+
+    func testAddressFromBareAddress() {
+        XCTAssertEqual(MailHeader.address(fromSender: "mailservice@oenb.at"), "mailservice@oenb.at")
+    }
+
+    func testAddressIsNilWhenNoAddressPresent() {
+        XCTAssertNil(MailHeader.address(fromSender: "Internal Memo"))
+    }
+
+    func testAddressRecoversFromUnmatchedAngleBracket() {
+        // No closing ">" -- must not fall back to the whole raw string
+        // (which would include the display name and the stray "<").
+        XCTAssertEqual(MailHeader.address(fromSender: "John <john@example.com"), "john@example.com")
+    }
 }

@@ -636,4 +636,73 @@ final class DraftJobProcessorTests: XCTestCase {
         XCTAssertNotEqual(draft.sender, "Max <max@example.com>",
                           "must never end up 'replying' to the account's own already-sent message")
     }
+
+    // MARK: draftOne applies learned style guidance (Phase 3)
+
+    func testDraftEligibleJobsAppliesLearnedStyleGuidanceWhenAvailable() async throws {
+        let draftStore = try DraftStore.inMemory()
+        let askStore = try SQLiteStore.inMemory()
+        let threadID = try ThreadResolver.resolveThread(messageID: "m5@x", inReplyTo: nil, references: [], store: askStore)
+        try askStore.upsertMessage(messageID: "m5@x", account: "acc", subject: "s", sender: "Alice <alice@acme.com>",
+                                   threadID: threadID, bodyText: "How's Friday looking?", dateUnix: 1)
+        try draftStore.upsertStyleProfile(scope: "address:alice@acme.com",
+                                          profileText: "Always signs off with just \u{201C}M\u{201D}.",
+                                          sampleCount: 3, updatedAt: 1)
+
+        try draftStore.enqueueJob(sourceID: 1, messageID: "m5@x", detectedAt: 1)
+        try draftStore.updateJobState(sourceID: 1, messageID: "m5@x", state: .eligible,
+                                      attempts: 0, lastError: nil, updatedAt: 1)
+
+        let capturing = CapturingChatProvider()
+        await DraftJobProcessor.draftEligibleJobs(draftStore: draftStore, askStore: askStore, chatProvider: capturing,
+                                                  embedder: StubEmbedder(), concurrency: 2)
+
+        let system = try XCTUnwrap(capturing.lastRequest?.system)
+        XCTAssertTrue(system.contains("Always signs off with just \u{201C}M\u{201D}."),
+                     "the learned address-scoped profile must be folded into the draft's system prompt")
+        XCTAssertEqual(try draftStore.job(sourceID: 1)?.state, .drafted)
+    }
+
+    func testDraftEligibleJobsOmitsStyleGuidanceWhenNoneLearnedYet() async throws {
+        let draftStore = try DraftStore.inMemory()
+        let askStore = try SQLiteStore.inMemory()
+        let threadID = try ThreadResolver.resolveThread(messageID: "m6@x", inReplyTo: nil, references: [], store: askStore)
+        try askStore.upsertMessage(messageID: "m6@x", account: "acc", subject: "s", sender: "bob@nobody.com",
+                                   threadID: threadID, bodyText: "Quick one for you.", dateUnix: 1)
+
+        try draftStore.enqueueJob(sourceID: 2, messageID: "m6@x", detectedAt: 1)
+        try draftStore.updateJobState(sourceID: 2, messageID: "m6@x", state: .eligible,
+                                      attempts: 0, lastError: nil, updatedAt: 1)
+
+        let capturing = CapturingChatProvider()
+        await DraftJobProcessor.draftEligibleJobs(draftStore: draftStore, askStore: askStore, chatProvider: capturing,
+                                                  embedder: StubEmbedder(), concurrency: 2)
+
+        let system = try XCTUnwrap(capturing.lastRequest?.system)
+        // Rule 1's base text legitimately mentions "STYLE GUIDANCE" generically
+        // regardless of whether any is supplied, so check for the appended
+        // block's own distinguishing header line instead of the bare phrase.
+        XCTAssertFalse(system.contains("STYLE GUIDANCE (how this user writes"),
+                       "no style block must be appended when nothing has been learned yet")
+    }
+}
+
+/// Captures the last `ChatRequest` it was asked to stream, so a test can
+/// assert on the assembled system/user prompt without a live model.
+private final class CapturingChatProvider: ChatProvider, @unchecked Sendable {
+    let name = "capturing-stub"
+    private let lock = NSLock()
+    private var _lastRequest: ChatRequest?
+    var lastRequest: ChatRequest? {
+        lock.lock(); defer { lock.unlock() }
+        return _lastRequest
+    }
+
+    func stream(_ request: ChatRequest) -> AsyncThrowingStream<String, Error> {
+        lock.lock(); _lastRequest = request; lock.unlock()
+        return AsyncThrowingStream { continuation in
+            continuation.yield("stub response")
+            continuation.finish()
+        }
+    }
 }

@@ -93,6 +93,12 @@ final class DraftEngine: ObservableObject {
                 draftStore: draftStore, askStore: askStore, chatProvider: localLLM,
                 embedder: OllamaEmbedder(model: model), concurrency: concurrency)
 
+            // Phase 3: local-only, same as everything else in this tick
+            // (H-11 has no per-instance consent moment for an unattended
+            // background trigger) — self-gated to once/24h internally.
+            try await StyleLearner.learnIfDue(draftStore: draftStore, askStore: askStore,
+                                              chatProvider: localLLM, accountEmail: settings.accountEmail)
+
             try DraftJobProcessor.purgeIfDue(draftStore: draftStore)
         } catch {
             RollingLog.shared.log("draft tick failed: \(error)", level: .error)

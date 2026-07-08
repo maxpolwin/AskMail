@@ -82,6 +82,23 @@ public struct DraftRecord: Sendable, Equatable {
     }
 }
 
+/// One row of `style_profiles` — a `StyleLearner`-maintained, incrementally
+/// merged summary of how the user actually writes, at a given scope (see
+/// `StyleScope`).
+public struct StyleProfile: Sendable, Equatable {
+    public var scope: String
+    public var profileText: String
+    public var sampleCount: Int
+    public var updatedAt: Int64
+
+    public init(scope: String, profileText: String, sampleCount: Int, updatedAt: Int64) {
+        self.scope = scope
+        self.profileText = profileText
+        self.sampleCount = sampleCount
+        self.updatedAt = updatedAt
+    }
+}
+
 private let SQLITE_TRANSIENT = unsafeBitCast(-1, to: sqlite3_destructor_type.self)
 
 /// The local database for Draft-Modus (`drafts.db`), physically decoupled
@@ -134,6 +151,14 @@ public final class DraftStore {
           status TEXT NOT NULL
         );
         """)
+        // Style learning (Phase 3). NULL means "not yet checked or no match
+        // found yet" -- StyleLearner re-examines every such row on each due
+        // tick; a row naturally stops being examined once DraftJobProcessor's
+        // 14-day retention purge deletes it, so no separate give-up bookkeeping
+        // is needed.
+        if !(try columnExists("drafts", "style_learned_at")) {
+            try execute("ALTER TABLE drafts ADD COLUMN style_learned_at INTEGER")
+        }
         try execute("CREATE INDEX IF NOT EXISTS idx_drafts_thread ON drafts(thread_id);")
         try execute("""
         CREATE TABLE IF NOT EXISTS draft_jobs(
@@ -206,6 +231,83 @@ public final class DraftStore {
             )
         }
         return result
+    }
+
+    // MARK: Style learning (Phase 3, docs/style-learning-contract.md)
+
+    /// Draft rows `StyleLearner` hasn't yet learned from (`style_learned_at
+    /// IS NULL`), old enough to plausibly have a real Sent reply by now,
+    /// oldest-generated first so the longest-waiting candidates are examined
+    /// before newer ones. `limit` bounds how much local-LLM work one learning
+    /// pass performs.
+    public func draftsAwaitingStyleLearning(olderThanGeneratedAt cutoff: Int64, limit: Int) throws -> [DraftRecord] {
+        lock.lock(); defer { lock.unlock() }
+        var results: [DraftRecord] = []
+        try query("""
+        SELECT pk, thread_id, latest_message_id, sender, subject, draft_text, generated_at, status
+        FROM drafts WHERE style_learned_at IS NULL AND generated_at <= ?
+        ORDER BY generated_at ASC LIMIT ?
+        """) { statement in
+            sqlite3_bind_int64(statement, 1, cutoff)
+            sqlite3_bind_int(statement, 2, Int32(limit))
+        } row: { statement in
+            results.append(DraftRecord(
+                pk: sqlite3_column_int64(statement, 0),
+                threadID: column(statement, 1),
+                latestMessageID: column(statement, 2),
+                sender: column(statement, 3),
+                subject: column(statement, 4),
+                draftText: column(statement, 5),
+                generatedAt: sqlite3_column_int64(statement, 6),
+                status: DraftStatus(rawValue: column(statement, 7)) ?? .pending
+            ))
+        }
+        return results
+    }
+
+    /// Marks a draft row as examined so it is never re-considered by a later
+    /// learning pass, whether or not a matching Sent reply was actually found
+    /// (`StyleLearner` only calls this once it found a match and folded it
+    /// into at least one scope's profile — see its doc comment for why a
+    /// no-match draft is deliberately left unmarked instead).
+    public func markStyleLearned(pk: Int64, at: Int64) throws {
+        lock.lock(); defer { lock.unlock() }
+        try run("UPDATE drafts SET style_learned_at = ? WHERE pk = ?") { statement in
+            sqlite3_bind_int64(statement, 1, at)
+            sqlite3_bind_int64(statement, 2, pk)
+        }
+    }
+
+    /// The learned style profile at a scope (`StyleScope.global`, `.domain`,
+    /// or `.address`), if any sample has been folded in yet.
+    public func styleProfile(scope: String) throws -> StyleProfile? {
+        lock.lock(); defer { lock.unlock() }
+        var result: StyleProfile?
+        try query("SELECT scope, profile_text, sample_count, updated_at FROM style_profiles WHERE scope = ?") { statement in
+            bind(statement, 1, scope)
+        } row: { statement in
+            result = StyleProfile(scope: column(statement, 0), profileText: column(statement, 1),
+                                  sampleCount: Int(sqlite3_column_int64(statement, 2)),
+                                  updatedAt: sqlite3_column_int64(statement, 3))
+        }
+        return result
+    }
+
+    /// Replaces a scope's profile wholesale — `StyleLearner` always computes
+    /// the full new text itself (folding the previous profile in via the
+    /// merge prompt), so there is no partial-update case.
+    public func upsertStyleProfile(scope: String, profileText: String, sampleCount: Int, updatedAt: Int64) throws {
+        lock.lock(); defer { lock.unlock() }
+        try run("""
+        INSERT INTO style_profiles(scope, profile_text, sample_count, updated_at) VALUES (?, ?, ?, ?)
+        ON CONFLICT(scope) DO UPDATE SET
+          profile_text = excluded.profile_text, sample_count = excluded.sample_count, updated_at = excluded.updated_at
+        """) { statement in
+            bind(statement, 1, scope)
+            bind(statement, 2, profileText)
+            sqlite3_bind_int64(statement, 3, Int64(sampleCount))
+            sqlite3_bind_int64(statement, 4, updatedAt)
+        }
     }
 
     // MARK: Job queue (Draft-Modus §7 orchestration)
@@ -423,5 +525,15 @@ public final class DraftStore {
     private func column(_ statement: OpaquePointer, _ index: Int32) -> String {
         guard let text = sqlite3_column_text(statement, index) else { return "" }
         return String(cString: text)
+    }
+
+    private func columnExists(_ table: String, _ column: String) throws -> Bool {
+        var exists = false
+        try query("PRAGMA table_info(\(table))") { _ in } row: { statement in
+            if String(cString: sqlite3_column_text(statement, 1)) == column {
+                exists = true
+            }
+        }
+        return exists
     }
 }
