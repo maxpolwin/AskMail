@@ -13,6 +13,11 @@ struct StubChatProvider: ChatProvider {
     /// Fires if this provider was mid-`delay` when the router cancelled it,
     /// proving cancellation really propagates and doesn't just get ignored.
     var onCancelled: (@Sendable () -> Void)? = nil
+    /// Non-nil to simulate a cloud provider for H-11 egress tests; nil (the
+    /// default) matches every existing local-only stub in this file, so
+    /// those tests see no `.egress` event/record, unchanged.
+    var egressHost: String? = nil
+    var egressModel: String = ""
 
     func stream(_ request: ChatRequest) -> AsyncThrowingStream<String, Error> {
         onStart?()
@@ -322,6 +327,123 @@ final class ProviderRouterTests: XCTestCase {
         try await Task.sleep(for: .milliseconds(80))
         XCTAssertTrue(primaryCancelled.value, "primary must be cancelled when the stream is torn down mid-race")
         XCTAssertTrue(localCancelled.value, "local must be cancelled when the stream is torn down mid-race")
+    }
+
+    // MARK: H-11 egress transparency
+
+    // A cloud primary's egress must be recorded + surfaced the instant its
+    // stream starts, before any other event.
+    func testEgressRecordedAndYieldedAtCloudPrimaryInitiation() async throws {
+        EgressLog.shared.clear()
+        let cloud = StubChatProvider(name: "mistral", tokens: ["cloud answer"],
+                                     egressHost: "api.mistral.ai", egressModel: "mistral-large-latest")
+        let router = ProviderRouter(primary: cloud, fallback: nil) { _, _ in }
+
+        var events: [ChatEvent] = []
+        for try await event in router.stream(ChatRequest(system: "s", user: "u")) {
+            events.append(event)
+        }
+
+        XCTAssertEqual(events, [.egress(host: "api.mistral.ai"), .token("cloud answer"), .done])
+        let logged = EgressLog.shared.events()
+        XCTAssertEqual(logged.count, 1)
+        XCTAssertEqual(logged.first?.host, "api.mistral.ai")
+        XCTAssertEqual(logged.first?.model, "mistral-large-latest")
+    }
+
+    // H-11's documented nuance: even when local wins the raceTimeout race
+    // and its answer is what gets displayed, the cloud primary's egress must
+    // already be on record — the content left the device the moment its
+    // stream started, regardless of who ultimately answers.
+    func testEgressRecordedEvenWhenLocalWinsRace() async throws {
+        EgressLog.shared.clear()
+        let cloudPrimary = StubChatProvider(name: "mistral", tokens: ["never seen"],
+                                            delay: .milliseconds(300),
+                                            egressHost: "api.mistral.ai", egressModel: "mistral-large-latest")
+        let local = StubChatProvider(name: "ollama-local", tokens: ["local ", "answer"],
+                                     delay: .milliseconds(60))
+        let router = ProviderRouter(primary: cloudPrimary, fallback: local,
+                                   raceTimeout: .milliseconds(20)) { _, _ in }
+
+        var events: [ChatEvent] = []
+        for try await event in router.stream(ChatRequest(system: "s", user: "u")) {
+            events.append(event)
+        }
+
+        XCTAssertEqual(events, [
+            .egress(host: "api.mistral.ai"),
+            .fallback(provider: "ollama-local", error: "no response from mistral within 0.02 seconds"),
+            .token("local "), .token("answer"), .done,
+        ])
+        let logged = EgressLog.shared.events()
+        XCTAssertEqual(logged.count, 1, "the cloud send must be on record even though local's answer wins")
+        XCTAssertEqual(logged.first?.host, "api.mistral.ai")
+    }
+
+    // A local-only provider must never touch EgressLog or yield .egress.
+    func testNoEgressRecordedForLocalOnlyProvider() async throws {
+        EgressLog.shared.clear()
+        let local = StubChatProvider(name: "ollama-local", tokens: ["ok"])
+        let router = ProviderRouter(primary: local, fallback: nil) { _, _ in }
+
+        var events: [ChatEvent] = []
+        for try await event in router.stream(ChatRequest(system: "s", user: "u")) {
+            events.append(event)
+        }
+
+        XCTAssertEqual(events, [.token("ok"), .done])
+        XCTAssertTrue(EgressLog.shared.events().isEmpty)
+    }
+}
+
+/// Task 1 (chat timeout bug) + H-10 (egress allowlist), exercised through the
+/// pure request builders rather than a live network round trip.
+final class ProviderRequestBuildingTests: XCTestCase {
+
+    // A cold model load, or an Ollama reload triggered by a num_ctx change,
+    // plus prompt evaluation, routinely exceeds URLRequest's default 60 s
+    // before the first streamed byte arrives; the built request must use the
+    // wider Defaults.chatRequestTimeout instead.
+    func testOllamaClientRequestUsesChatRequestTimeout() throws {
+        XCTAssertEqual(Defaults.chatRequestTimeout, 180)
+        let client = OllamaClient(host: Defaults.ollamaLocalHost, model: "qwen2.5:7b")
+        let request = try client.buildRequest(ChatRequest(system: "s", user: "u"))
+        XCTAssertEqual(request.timeoutInterval, Defaults.chatRequestTimeout)
+    }
+
+    func testMistralClientRequestUsesChatRequestTimeout() throws {
+        let client = MistralClient(apiKey: "key")
+        let request = try client.buildRequest(ChatRequest(system: "s", user: "u"))
+        XCTAssertEqual(request.timeoutInterval, Defaults.chatRequestTimeout)
+    }
+
+    // H-10: the request builder is where the allowlist is enforced, so a
+    // user-configured non-allowlisted host must be refused here, before a
+    // URLRequest is ever handed to URLSession.
+    func testOllamaClientRequestRefusesNonAllowlistedHost() {
+        let client = OllamaClient(host: URL(string: "http://192.168.1.50:11434")!, model: "qwen2.5:7b")
+        XCTAssertThrowsError(try client.buildRequest(ChatRequest(system: "s", user: "u"))) { error in
+            guard case ProviderError.egressBlocked(let host) = error else {
+                return XCTFail("expected egressBlocked, got \(error)")
+            }
+            XCTAssertEqual(host, "192.168.1.50")
+        }
+    }
+
+    // MARK: egressHost / egressModel (H-11 signal)
+
+    func testOllamaClientEgressHostReflectsApiKeyPresence() {
+        let local = OllamaClient(host: Defaults.ollamaLocalHost, model: "m")
+        XCTAssertNil(local.egressHost, "the local daemon (no API key) never leaves the device")
+        let cloud = OllamaClient(host: Defaults.ollamaCloudHost, model: "m", apiKey: "k")
+        XCTAssertEqual(cloud.egressHost, "ollama.com")
+        XCTAssertEqual(cloud.egressModel, "m")
+    }
+
+    func testMistralClientEgressHostAlwaysSet() {
+        let client = MistralClient(apiKey: "k", model: "mistral-large-latest")
+        XCTAssertEqual(client.egressHost, "api.mistral.ai")
+        XCTAssertEqual(client.egressModel, "mistral-large-latest")
     }
 }
 

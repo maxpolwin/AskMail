@@ -177,6 +177,41 @@ final class OllamaControlTests: XCTestCase {
         XCTAssertEqual(snapshot.status, .ready(modelCount: 1))
     }
 
+    // MARK: H-10 egress allowlist
+
+    // A non-allowlisted (e.g. LAN) host must be refused before any network
+    // I/O — reachable() has no throwing signature, so it folds the refusal
+    // into the same false result callers already treat as "not up".
+    func testReachableFalseForNonAllowlistedHostWithoutNetworkIO() async {
+        let control = OllamaControl(host: URL(string: "http://10.0.0.5:11434")!)
+        let reachable = await control.reachable()
+        XCTAssertFalse(reachable)
+    }
+
+    func testInstalledModelsThrowsEgressBlockedForNonAllowlistedHost() async {
+        let control = OllamaControl(host: URL(string: "http://10.0.0.5:11434")!)
+        do {
+            _ = try await control.installedModels()
+            XCTFail("expected egressBlocked")
+        } catch ProviderError.egressBlocked(let host) {
+            XCTAssertEqual(host, "10.0.0.5")
+        } catch {
+            XCTFail("expected egressBlocked, got \(error)")
+        }
+    }
+
+    func testShowModelThrowsEgressBlockedForNonAllowlistedHost() async {
+        let control = OllamaControl(host: URL(string: "http://10.0.0.5:11434")!)
+        do {
+            _ = try await control.showModel("qwen2.5:7b")
+            XCTFail("expected egressBlocked")
+        } catch ProviderError.egressBlocked {
+            // expected
+        } catch {
+            XCTFail("expected egressBlocked, got \(error)")
+        }
+    }
+
     // MARK: Install locator
 
     func testBinaryPresenceChecksKnownLocations() {

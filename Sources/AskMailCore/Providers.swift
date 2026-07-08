@@ -26,7 +26,22 @@ public struct ChatRequest: Sendable {
 
 public protocol ChatProvider: Sendable {
     var name: String { get }
+    /// Cloud host this provider's `stream(_:)` sends the prompt to over the
+    /// network, or nil when it never leaves the device. This is both the
+    /// H-10 allowlist target and the H-11 egress-transparency signal:
+    /// `ProviderRouter` records + surfaces a `ChatEvent.egress` the instant
+    /// a provider with a non-nil host starts streaming, regardless of which
+    /// provider's answer is ultimately used (see `ProviderRouter.startPump`).
+    var egressHost: String? { get }
+    /// The exact model id sent alongside `egressHost`, for the egress log's
+    /// audit record. Meaningless when `egressHost` is nil.
+    var egressModel: String { get }
     func stream(_ request: ChatRequest) -> AsyncThrowingStream<String, Error>
+}
+
+public extension ChatProvider {
+    var egressHost: String? { nil }
+    var egressModel: String { "" }
 }
 
 public protocol EmbeddingProvider: Sendable {
@@ -40,11 +55,21 @@ public enum ProviderError: Error, CustomStringConvertible {
     /// A local Ollama model isn't pulled yet. Carries the model name so callers
     /// can show the exact `ollama pull <model>` remedy instead of a raw 404.
     case ollamaModelMissing(model: String)
+    /// Hardening H-10: `host` isn't on `EgressPolicy`'s compiled-in
+    /// allowlist. Thrown before any request is sent.
+    case egressBlocked(host: String)
 
+    /// Hardening H-13: cloud 4xx bodies often echo the submitted prompt
+    /// (i.e. mail content, via the assembled prompt in QueryService), and
+    /// both the rolling log and the panel's error message are built with
+    /// `"\(error)"` string interpolation, which reads this property. The
+    /// `.http` case therefore caps and single-lines its body here; the full,
+    /// unredacted body still lives in the case's associated value for any
+    /// caller that genuinely needs it (e.g. `isOllamaModelMissing`).
     public var description: String {
         switch self {
         case .http(let status, let body):
-            return "HTTP \(status): \(body)"
+            return "HTTP \(status): \(Self.redacted(body))"
         case .malformedResponse(let detail):
             return "malformed provider response: \(detail)"
         case .missingAPIKey(let service):
@@ -52,7 +77,22 @@ public enum ProviderError: Error, CustomStringConvertible {
         case .ollamaModelMissing(let model):
             return "Ollama model \u{201C}\(model)\u{201D} isn\u{2019}t installed. "
                 + "Download it in Settings \u{2192} Local engine, then try again."
+        case .egressBlocked(let host):
+            return "blocked outbound request to \u{201C}\(host)\u{201D}: not on the egress allowlist"
         }
+    }
+
+    /// Collapses newlines (so one log line stays one line) and caps at 300
+    /// chars, appending a truncation marker when cut — bounded well under
+    /// the 4096-char raw body `ensureOK` collects.
+    private static func redacted(_ body: String) -> String {
+        let collapsed = body
+            .replacingOccurrences(of: "\r\n", with: " ")
+            .replacingOccurrences(of: "\n", with: " ")
+            .replacingOccurrences(of: "\r", with: " ")
+        let limit = 300
+        guard collapsed.count > limit else { return collapsed }
+        return String(collapsed.prefix(limit)) + "\u{2026} [truncated]"
     }
 
     /// Whether an error is Ollama's missing-model 404 — which retrying won't
@@ -118,6 +158,10 @@ public struct OllamaClient: ChatProvider {
     public var apiKey: String?
 
     public var name: String { apiKey == nil ? "ollama-local" : "ollama-cloud" }
+    /// Cloud egress only when an API key is configured — the local daemon
+    /// (apiKey nil) never leaves the device.
+    public var egressHost: String? { apiKey == nil ? nil : host.host }
+    public var egressModel: String { model }
 
     public init(host: URL = Defaults.ollamaLocalHost,
                 model: String = Defaults.localChatModel,
@@ -127,38 +171,59 @@ public struct OllamaClient: ChatProvider {
         self.apiKey = apiKey
     }
 
+    /// Builds the `/api/chat` request, including the H-10 egress check.
+    /// Not private, so tests can assert its shape (e.g. the timeout) without
+    /// a real network round trip.
+    func buildRequest(_ request: ChatRequest) throws -> URLRequest {
+        let url = host.appendingPathComponent("api/chat")
+        try EgressPolicy.check(url)
+        var urlRequest = URLRequest(url: url, timeoutInterval: Defaults.chatRequestTimeout)
+        urlRequest.httpMethod = "POST"
+        urlRequest.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        if let apiKey {
+            urlRequest.setValue("Bearer \(apiKey)", forHTTPHeaderField: "Authorization")
+        }
+        var options: [String: Any] = [
+            "temperature": request.temperature,
+            "num_predict": request.maxTokens,
+        ]
+        // Size the context window to the prompt so Ollama doesn't
+        // truncate it to the model's (smaller) default.
+        if request.contextWindow > 0 {
+            options["num_ctx"] = request.contextWindow
+        }
+        let body: [String: Any] = [
+            "model": model,
+            "stream": true,
+            "messages": [
+                ["role": "system", "content": request.system],
+                ["role": "user", "content": request.user],
+            ],
+            "options": options,
+        ]
+        urlRequest.httpBody = try JSONSerialization.data(withJSONObject: body)
+        return urlRequest
+    }
+
     public func stream(_ request: ChatRequest) -> AsyncThrowingStream<String, Error> {
         AsyncThrowingStream { continuation in
             let task = Task {
                 do {
-                    var urlRequest = URLRequest(url: host.appendingPathComponent("api/chat"))
-                    urlRequest.httpMethod = "POST"
-                    urlRequest.setValue("application/json", forHTTPHeaderField: "Content-Type")
-                    if let apiKey {
-                        urlRequest.setValue("Bearer \(apiKey)", forHTTPHeaderField: "Authorization")
-                    }
-                    var options: [String: Any] = [
-                        "temperature": request.temperature,
-                        "num_predict": request.maxTokens,
-                    ]
-                    // Size the context window to the prompt so Ollama doesn't
-                    // truncate it to the model's (smaller) default.
-                    if request.contextWindow > 0 {
-                        options["num_ctx"] = request.contextWindow
-                    }
-                    let body: [String: Any] = [
-                        "model": model,
-                        "stream": true,
-                        "messages": [
-                            ["role": "system", "content": request.system],
-                            ["role": "user", "content": request.user],
-                        ],
-                        "options": options,
-                    ]
-                    urlRequest.httpBody = try JSONSerialization.data(withJSONObject: body)
+                    let urlRequest = try buildRequest(request)
 
-                    let (bytes, response) = try await URLSession.shared.bytes(for: urlRequest)
-                    try await Self.ensureOK(response: response, bytes: bytes)
+                    // Retry only the connect-through-headers phase (attempts:
+                    // 2): a cold model load, or a daemon reload triggered by
+                    // a changed num_ctx, plus prompt evaluation, can blow
+                    // past a single attempt's idle timeout before the first
+                    // byte arrives. Safe because no tokens have been yielded
+                    // yet; once the loop below starts consuming `bytes`,
+                    // never retry again.
+                    let bytes = try await Retry.run(attempts: 2, shouldRetry: OllamaEmbedder.isTransient) {
+                        () async throws -> URLSession.AsyncBytes in
+                        let (bytes, response) = try await URLSession.shared.bytes(for: urlRequest)
+                        try await Self.ensureOK(response: response, bytes: bytes)
+                        return bytes
+                    }
 
                     for try await line in bytes.lines {
                         guard let data = line.data(using: .utf8),
@@ -221,8 +286,12 @@ public struct OllamaEmbedder: EmbeddingProvider {
 
     public func embed(_ texts: [String]) async throws -> [[Float]] {
         guard !texts.isEmpty else { return [] }
-        var request = URLRequest(url: host.appendingPathComponent("api/embed"),
-                                 timeoutInterval: timeout)
+        let url = host.appendingPathComponent("api/embed")
+        // Stricter than the general H-10 allowlist: loopback only, even
+        // though ollama.com would otherwise pass — mailbox embeddings must
+        // never leave the device (SECURITY.md, struct doc comment above).
+        try EgressPolicy.checkLoopbackOnly(url)
+        var request = URLRequest(url: url, timeoutInterval: timeout)
         request.httpMethod = "POST"
         request.setValue("application/json", forHTTPHeaderField: "Content-Type")
         request.httpBody = try JSONSerialization.data(withJSONObject: [
@@ -274,6 +343,9 @@ public struct MistralClient: ChatProvider {
     public var endpoint: URL
 
     public var name: String { "mistral" }
+    /// Mistral has no local variant — always a cloud egress.
+    public var egressHost: String? { endpoint.host }
+    public var egressModel: String { model }
 
     public init(apiKey: String,
                 model: String = Defaults.mistralChatModel,
@@ -283,27 +355,43 @@ public struct MistralClient: ChatProvider {
         self.endpoint = endpoint
     }
 
+    /// Builds the chat-completions request, including the H-10 egress
+    /// check. Not private, so tests can assert its shape without a real
+    /// network round trip.
+    func buildRequest(_ request: ChatRequest) throws -> URLRequest {
+        try EgressPolicy.check(endpoint)
+        var urlRequest = URLRequest(url: endpoint, timeoutInterval: Defaults.chatRequestTimeout)
+        urlRequest.httpMethod = "POST"
+        urlRequest.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        urlRequest.setValue("Bearer \(apiKey)", forHTTPHeaderField: "Authorization")
+        urlRequest.httpBody = try JSONSerialization.data(withJSONObject: [
+            "model": model,
+            "stream": true,
+            "max_tokens": request.maxTokens,
+            "temperature": request.temperature,
+            "messages": [
+                ["role": "system", "content": request.system],
+                ["role": "user", "content": request.user],
+            ],
+        ] as [String: Any])
+        return urlRequest
+    }
+
     public func stream(_ request: ChatRequest) -> AsyncThrowingStream<String, Error> {
         AsyncThrowingStream { continuation in
             let task = Task {
                 do {
-                    var urlRequest = URLRequest(url: endpoint)
-                    urlRequest.httpMethod = "POST"
-                    urlRequest.setValue("application/json", forHTTPHeaderField: "Content-Type")
-                    urlRequest.setValue("Bearer \(apiKey)", forHTTPHeaderField: "Authorization")
-                    urlRequest.httpBody = try JSONSerialization.data(withJSONObject: [
-                        "model": model,
-                        "stream": true,
-                        "max_tokens": request.maxTokens,
-                        "temperature": request.temperature,
-                        "messages": [
-                            ["role": "system", "content": request.system],
-                            ["role": "user", "content": request.user],
-                        ],
-                    ] as [String: Any])
+                    let urlRequest = try buildRequest(request)
 
-                    let (bytes, response) = try await URLSession.shared.bytes(for: urlRequest)
-                    try await OllamaClient.ensureOK(response: response, bytes: bytes)
+                    // Same connect-phase-only retry as OllamaClient.stream
+                    // (Task 1): safe pre-first-token, never once streaming
+                    // has begun.
+                    let bytes = try await Retry.run(attempts: 2, shouldRetry: OllamaEmbedder.isTransient) {
+                        () async throws -> URLSession.AsyncBytes in
+                        let (bytes, response) = try await URLSession.shared.bytes(for: urlRequest)
+                        try await OllamaClient.ensureOK(response: response, bytes: bytes)
+                        return bytes
+                    }
 
                     for try await line in bytes.lines {
                         guard line.hasPrefix("data:") else { continue }
@@ -333,6 +421,7 @@ extension MistralClient {
     /// (`GET /v1/models`; requires the API key).
     public static func availableModels(apiKey: String,
                                        endpoint: URL = URL(string: "https://api.mistral.ai/v1/models")!) async throws -> [String] {
+        try EgressPolicy.check(endpoint)
         var request = URLRequest(url: endpoint, timeoutInterval: 10)
         request.setValue("Bearer \(apiKey)", forHTTPHeaderField: "Authorization")
         let (data, response) = try await URLSession.shared.data(for: request)
@@ -362,6 +451,13 @@ public enum ChatEvent: Sendable, Equatable {
     /// warning and clears any partial text. The full reason is already in
     /// the rolling log.
     case fallback(provider: String, error: String)
+    /// Hardening H-11: yielded the instant a cloud provider's request is
+    /// *initiated* — before any answer is chosen, since the raceTimeout race
+    /// can send content to the cloud even when local ends up winning and
+    /// being displayed. `host` matches the provider's `egressHost`; the
+    /// corresponding `EgressEvent` has already been recorded in `EgressLog`
+    /// by the time this is yielded (see `ProviderRouter.startPump`).
+    case egress(host: String)
     case done
 }
 
@@ -496,19 +592,36 @@ public struct ProviderRouter: Sendable {
         }
     }
 
+    /// Starts `provider`'s stream, first recording + surfacing the H-11
+    /// egress signal if `provider.egressHost` is non-nil. Every call site
+    /// that starts a provider stream goes through here, deliberately: the
+    /// record/event must fire at the moment the stream *starts*, not when
+    /// its answer is chosen — the raceTimeout race can send content to a
+    /// cloud provider that later loses the race to local and is never
+    /// displayed, but the send already happened.
+    private func startPump(_ provider: ChatProvider, request: ChatRequest,
+                           continuation: AsyncThrowingStream<ChatEvent, Error>.Continuation) -> TokenPump {
+        if let host = provider.egressHost {
+            EgressLog.shared.record(EgressEvent(date: Date(), host: host, model: provider.egressModel,
+                                                promptChars: request.system.count + request.user.count))
+            continuation.yield(.egress(host: host))
+        }
+        return TokenPump(provider.stream(request))
+    }
+
     private func run(_ request: ChatRequest,
                      continuation: AsyncThrowingStream<ChatEvent, Error>.Continuation,
                      cancelBag: CancelBag) async {
         log("provider=\(primary.name) start maxTokens=\(request.maxTokens) temperature=\(request.temperature) contextWindow=\(request.contextWindow)", .debug)
 
         guard let fallback, fallback.name != primary.name else {
-            let pump = TokenPump(primary.stream(request))
+            let pump = startPump(primary, request: request, continuation: continuation)
             await drainRemaining(pump, provider: primary, request: request,
                                 isFallback: false, continuation: continuation)
             return
         }
 
-        let primaryPump = TokenPump(primary.stream(request))
+        let primaryPump = startPump(primary, request: request, continuation: continuation)
         let primaryTask = Task<String?, Error> { try await primaryPump.next() }
         cancelBag.track { primaryTask.cancel() }
         let sleeper = Task<Void, Error> { try await Task.sleep(for: raceTimeout) }
@@ -519,7 +632,7 @@ public struct ProviderRouter: Sendable {
             // alongside it (primary keeps running) and use whichever answers
             // first, discarding the other.
             log("provider=\(primary.name) exceeded \(raceTimeout) response window; racing \(fallback.name) alongside it", .error)
-            let localPump = TokenPump(fallback.stream(request))
+            let localPump = startPump(fallback, request: request, continuation: continuation)
             let localTask = Task<String?, Error> { try await localPump.next() }
             cancelBag.track { localTask.cancel() }
 
@@ -591,7 +704,7 @@ public struct ProviderRouter: Sendable {
                     continuation.finish(throwing: localError)
                 }
             } else {
-                let freshPump = TokenPump(fallback.stream(request))
+                let freshPump = startPump(fallback, request: request, continuation: continuation)
                 await drainRemaining(freshPump, provider: fallback, request: request,
                                     isFallback: true, continuation: continuation)
             }
@@ -623,7 +736,7 @@ public struct ProviderRouter: Sendable {
             }
             log("provider=\(provider.name) FAILED, falling back to \(fallback.name). error=\(error)", .error)
             continuation.yield(.fallback(provider: fallback.name, error: String(describing: error)))
-            let freshPump = TokenPump(fallback.stream(request))
+            let freshPump = startPump(fallback, request: request, continuation: continuation)
             await drainRemaining(freshPump, provider: fallback, request: request,
                                 isFallback: true, continuation: continuation)
         }

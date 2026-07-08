@@ -36,6 +36,12 @@ public enum Defaults {
     /// local alongside it (FR-4 extension), so a slow cloud response doesn't
     /// force the user to wait out its full worst-case timeout.
     public static let providerRaceTimeout: Duration = .seconds(5)
+    /// Idle timeout for a chat request, deliberately far above URLRequest's
+    /// default 60 s: a cold model load, or an Ollama daemon reload triggered
+    /// by a changed `num_ctx`, plus prompt evaluation, routinely exceeds
+    /// 60 s before the first streamed byte arrives — mirrors
+    /// `OllamaEmbedder.timeout` (Providers.swift), generous for the same reason.
+    public static let chatRequestTimeout: TimeInterval = 180
 
     // MARK: Ingestion
     /// Apple Mail's container: `~/Library/Mail`. TCC-protected — reading it (or
