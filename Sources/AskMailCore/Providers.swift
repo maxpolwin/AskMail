@@ -330,6 +330,10 @@ public struct OllamaEmbedder: EmbeddingProvider {
     @Sendable
     static func isTransient(_ error: Error) -> Bool {
         if case ProviderError.http(let status, _) = error { return (500...599).contains(status) }
+        // A cancelled request (panel closed, task torn down) must not burn a
+        // retry attempt on a request that will only be cancelled again.
+        if error is CancellationError { return false }
+        if let urlError = error as? URLError, urlError.code == .cancelled { return false }
         return true  // URLError timeouts / connection drops are worth retrying
     }
 }
