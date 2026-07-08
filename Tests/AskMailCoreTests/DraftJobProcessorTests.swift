@@ -211,6 +211,60 @@ final class DraftJobProcessorTests: XCTestCase {
         XCTAssertTrue(try draftStore.jobs(in: [.pending]).isEmpty)
     }
 
+    // Perf fix (docs/draft-modus-plan.md Phase 4): a caller (DraftEngine)
+    // that already walked the account tree once should be able to hand that
+    // result straight to detectAndEnqueue instead of it doing a second,
+    // independent walk -- these two tests pin that the passed `fileIndex`
+    // is what actually drives resolution, not a silent fallback to disk.
+    func testDetectAndEnqueueDoesNotFallBackToADiskWalkWhenAnExplicitFileIndexMisses() throws {
+        let accountDirectory = try makeAccountTree()
+        defer { try? FileManager.default.removeItem(at: accountDirectory) }
+        // A real Inbox file exists on disk at the path a fresh
+        // EmlxLocator.index() walk would find...
+        try writeEmlxStub(in: accountDirectory, mailbox: "INBOX", rowID: 1001)
+
+        let indexPath = accountDirectory.appendingPathComponent("envelope-index.sqlite").path
+        try makeSyntheticEnvelopeIndex(at: indexPath, messages: [
+            (rowID: 1001, subject: "Inbox message", senderAddress: "alice@example.com",
+             dateReceivedRaw: 100 - Defaults.cocoaEpochOffset),
+        ])
+
+        let draftStore = try DraftStore.inMemory()
+        let reader = try EnvelopeIndexReader(path: indexPath)
+        // ...but an explicitly empty fileIndex is passed instead.
+        let toIngest = try DraftJobProcessor.detectAndEnqueue(
+            envelopeReader: reader, draftStore: draftStore, accountDirectory: accountDirectory, fileIndex: [:])
+
+        XCTAssertTrue(toIngest.isEmpty, "an explicitly passed fileIndex must be authoritative, never silently re-walked")
+        XCTAssertTrue(try draftStore.jobs(in: [.pending]).isEmpty)
+        // Watermark bookkeeping is independent of file resolution either way.
+        XCTAssertEqual(try draftStore.meta("draft_watermark_date_unix"), "100")
+    }
+
+    func testDetectAndEnqueueBuildsEmlxFilesFromThePassedFileIndex() throws {
+        let accountDirectory = try makeAccountTree()
+        defer { try? FileManager.default.removeItem(at: accountDirectory) }
+        let indexPath = accountDirectory.appendingPathComponent("envelope-index.sqlite").path
+        try makeSyntheticEnvelopeIndex(at: indexPath, messages: [
+            (rowID: 1001, subject: "Inbox message", senderAddress: "alice@example.com",
+             dateReceivedRaw: 100 - Defaults.cocoaEpochOffset),
+        ])
+
+        let draftStore = try DraftStore.inMemory()
+        let reader = try EnvelopeIndexReader(path: indexPath)
+        // No file is written on disk at all -- the passed fileIndex is the
+        // only source of truth for where 1001 lives.
+        let claimedURL = accountDirectory
+            .appendingPathComponent("INBOX.mbox/UUID/Data/0/0/Messages/1001.emlx")
+        let toIngest = try DraftJobProcessor.detectAndEnqueue(
+            envelopeReader: reader, draftStore: draftStore, accountDirectory: accountDirectory,
+            fileIndex: [1001: claimedURL])
+
+        XCTAssertEqual(toIngest.map(\.sourceID), [1001])
+        XCTAssertEqual(toIngest.first?.url, claimedURL,
+                       "the EmlxFile's url must come from the passed fileIndex, not a fresh scan()")
+    }
+
     // MARK: classifyPendingJobs
 
     func makeIngestedMessage(store: SQLiteStore, messageID: String, sender: String, bodyText: String,

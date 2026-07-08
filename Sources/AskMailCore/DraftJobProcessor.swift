@@ -73,9 +73,18 @@ public enum DraftJobProcessor {
     /// `MailboxIngestor.ingestNew(_:)` — detection never ingests itself, so
     /// thread-linking/chunking/embedding stays on the one shared, tested path
     /// `Vectorizer` also uses.
+    ///
+    /// `fileIndex` (perf): a `DraftEngine` tick also needs a ROWID -> URL map
+    /// for `classifyPendingJobs` right after this call, so the caller walks
+    /// the account tree once (`EmlxLocator.index`) and passes the result in
+    /// here, instead of this function doing its own separate walk on top of
+    /// the caller's -- consolidating what was previously up to three
+    /// recursive filesystem walks per tick down to one. Defaults to
+    /// computing it locally (matching the old behavior exactly) so existing
+    /// callers/tests that don't have one handy keep working unchanged.
     @discardableResult
     public static func detectAndEnqueue(envelopeReader: EnvelopeIndexReader, draftStore: DraftStore,
-                                        accountDirectory: URL,
+                                        accountDirectory: URL, fileIndex: [Int64: URL]? = nil,
                                         watermarkKey: String = "draft_watermark_date_unix",
                                         now: Date = Date()) throws -> [EmlxFile] {
         let watermark = Int64(try draftStore.meta(watermarkKey) ?? "0") ?? 0
@@ -84,7 +93,7 @@ public enum DraftJobProcessor {
         guard !candidates.isEmpty else { return [] }
         let newWatermark = max(watermark, candidates.map(\.dateReceivedUnix).max() ?? watermark)
 
-        let fileIndex = EmlxLocator.index(accountDirectory: accountDirectory)
+        let fileIndex = fileIndex ?? EmlxLocator.index(accountDirectory: accountDirectory)
         var enqueuedSourceIDs: Set<Int64> = []
         for candidate in candidates {
             guard let url = fileIndex[candidate.rowID],
@@ -96,8 +105,28 @@ public enum DraftJobProcessor {
         try draftStore.setMeta(watermarkKey, value: String(newWatermark))
 
         guard !enqueuedSourceIDs.isEmpty else { return [] }
-        return EmlxLocator.scan(accountDirectory: accountDirectory)
-            .filter { enqueuedSourceIDs.contains($0.sourceID) }
+        // Built directly from the already-resolved fileIndex + a per-file
+        // resourceValues() lookup (bounded by the small enqueued set) rather
+        // than a second full-tree EmlxLocator.scan() -- see the perf note
+        // above. Every enqueued id already passed the inbox filter above, so
+        // it's guaranteed to satisfy scan()'s own isIndexed() filter too.
+        return enqueuedSourceIDs.compactMap { sourceID in
+            fileIndex[sourceID].map { url in
+                EmlxFile(sourceID: sourceID, url: url, fingerprint: fingerprint(of: url))
+            }
+        }
+    }
+
+    /// Mirrors `EmlxLocator.scan`'s change-fingerprint formula exactly
+    /// (modification time + size) so `MailboxIngestor.ingestNew` can't tell
+    /// the difference between an `EmlxFile` built here and one built by a
+    /// full `scan()` walk.
+    private static func fingerprint(of url: URL) -> String {
+        let keys: [URLResourceKey] = [.contentModificationDateKey, .fileSizeKey]
+        let values = try? url.resourceValues(forKeys: Set(keys))
+        let modTime = values?.contentModificationDate?.timeIntervalSinceReferenceDate ?? 0
+        let size = values?.fileSize ?? 0
+        return "\(modTime)-\(size)"
     }
 
     // MARK: Classification
