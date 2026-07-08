@@ -23,10 +23,12 @@ public enum CitationRenderer {
         }
     }
 
+    // A single bracket may cite several sources: [1], [4,6], [4, 6]. The
+    // pattern is a fixed literal, so it's compiled once rather than per call.
+    private static let markerRegex = try! NSRegularExpression(pattern: "\\[\\s*(\\d+(?:\\s*,\\s*\\d+)*)\\s*\\]")
+
     public static func render(answer: String, sourceMap: [Int: SourceRef]) -> Rendered {
-        // A single bracket may cite several sources: [1], [4,6], [4, 6].
-        let regex = try! NSRegularExpression(pattern: "\\[\\s*(\\d+(?:\\s*,\\s*\\d+)*)\\s*\\]")
-        let matches = regex.matches(in: answer, range: NSRange(answer.startIndex..., in: answer))
+        let matches = markerRegex.matches(in: answer, range: NSRange(answer.startIndex..., in: answer))
 
         // The numbers inside one marker, parsed from the original answer.
         func markerNumbers(_ match: NSTextCheckingResult) -> [Int] {

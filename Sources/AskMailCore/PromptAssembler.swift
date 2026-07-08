@@ -78,10 +78,22 @@ public struct PromptAssembler: Sendable {
 
     // MARK: Context block (§3)
 
+    /// Wraps the chunk body in `BEGIN EMAIL [N]` / `END EMAIL [N]` markers
+    /// (hardening H-15) so retrieved mail is structurally delimited as data,
+    /// not instructions, for the model. The metadata line and `[N]`
+    /// numbering are unchanged from before the wrapper was added.
+    /// `CitationRenderer` only ever parses `[N]` markers out of the model's
+    /// completed *answer*, never out of this prompt-side text, so it is
+    /// unaffected by the wrapper.
     func renderChunk(_ chunk: ContextChunk, number: Int) -> String {
         // Forwarded messages cite the original author, not whoever forwarded it.
         let attribution = chunk.originalSender.map { "\($0) (forwarded by \(chunk.sender))" } ?? chunk.sender
-        return "--- [\(number)] from: \(attribution) | date: \(Self.ymd(chunk.dateUnix)) | source: \(chunk.source.rawValue) ---\n\(chunk.text)"
+        return """
+        --- [\(number)] from: \(attribution) | date: \(Self.ymd(chunk.dateUnix)) | source: \(chunk.source.rawValue) ---
+        BEGIN EMAIL [\(number)]
+        \(chunk.text)
+        END EMAIL [\(number)]
+        """
     }
 
     /// Drops lowest-ranked chunks first while over `contextTokenLimit`.
