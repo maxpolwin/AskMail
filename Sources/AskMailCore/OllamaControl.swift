@@ -91,24 +91,30 @@ public struct OllamaControl: OllamaControlling {
     }
 
     public func reachable() async -> Bool {
-        let request = URLRequest(url: host.appendingPathComponent("api/version"),
-                                 timeoutInterval: 2)
+        let url = host.appendingPathComponent("api/version")
+        // H-10: an egress-blocked host isn't "unreachable" in the retryable
+        // sense, but reachable() has no throwing signature, so fold it into
+        // the same false result callers already treat as "not up".
+        guard (try? EgressPolicy.check(url)) != nil else { return false }
+        let request = URLRequest(url: url, timeoutInterval: 2)
         guard let (_, response) = try? await URLSession.shared.data(for: request),
               let http = response as? HTTPURLResponse else { return false }
         return (200...299).contains(http.statusCode)
     }
 
     public func installedModels() async throws -> [InstalledModel] {
-        let request = authorized(URLRequest(url: host.appendingPathComponent("api/tags"),
-                                            timeoutInterval: 5))
+        let url = host.appendingPathComponent("api/tags")
+        try EgressPolicy.check(url)
+        let request = authorized(URLRequest(url: url, timeoutInterval: 5))
         let (data, response) = try await URLSession.shared.data(for: request)
         try Self.ensureOK(response: response, data: data)
         return try Self.parseTags(data)
     }
 
     public func showModel(_ id: String) async throws -> OllamaModelInfo {
-        var request = URLRequest(url: host.appendingPathComponent("api/show"),
-                                 timeoutInterval: 10)
+        let url = host.appendingPathComponent("api/show")
+        try EgressPolicy.check(url)
+        var request = URLRequest(url: url, timeoutInterval: 10)
         request.httpMethod = "POST"
         request.setValue("application/json", forHTTPHeaderField: "Content-Type")
         request.httpBody = try JSONSerialization.data(withJSONObject: ["model": id])
@@ -122,7 +128,9 @@ public struct OllamaControl: OllamaControlling {
         return AsyncThrowingStream { continuation in
             let task = Task {
                 do {
-                    var request = URLRequest(url: host.appendingPathComponent("api/pull"))
+                    let url = host.appendingPathComponent("api/pull")
+                    try EgressPolicy.check(url)
+                    var request = URLRequest(url: url)
                     request.httpMethod = "POST"
                     request.setValue("application/json", forHTTPHeaderField: "Content-Type")
                     // A multi-GB pull can take a long time between bytes on a

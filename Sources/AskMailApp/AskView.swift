@@ -257,6 +257,12 @@ final class AskViewModel: NSObject, ObservableObject {
                         raw = ""
                         answer = ""
                         warning = "Cloud provider failed; answered by \(provider) instead."
+                    case .egress:
+                        // H-11 egress transparency: recorded in EgressLog at
+                        // request-initiation time regardless of this switch;
+                        // the auditable "what left, when, to whom" view is a
+                        // separate, later UI change (not this pass).
+                        break
                     case .done:
                         break
                     }
