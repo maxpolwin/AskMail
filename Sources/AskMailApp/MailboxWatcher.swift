@@ -1,100 +1,126 @@
 import Foundation
+import CoreServices
 
-/// Watches a directory for changes via a `DispatchSourceFileSystemObject`,
-/// debounced — a fast (best-effort) trigger for `DraftScheduler` rather than
-/// waiting for its 2-minute floor `Timer`. No third-party dependency and no
-/// classic FSEvents API (which needs its own run loop): `DispatchSource` is
-/// the idiomatic Foundation-only equivalent. New to this codebase — no
-/// existing precedent to mirror, so this is exercised directly by
-/// `MailboxWatcherTests` against a real temporary directory.
+/// Watches a mailbox directory *tree* for changes via FSEvents, debounced —
+/// a fast (best-effort) trigger for `DraftScheduler` and
+/// `VectorizationScheduler` rather than waiting for their floor `Timer`s.
 ///
-/// All mutation of `source`/`debounceWorkItem`/`reopenWorkItem` is confined
-/// to `queue` — including `start()`/`stop()` themselves, which hop onto it
-/// synchronously — so a caller on any thread (`DraftScheduler` is
-/// `@MainActor`) can never race the watcher's own event handler or reopen
-/// logic, which also run on `queue`. An earlier version mutated these
-/// properties directly from the caller's thread with no synchronization at
-/// all; confirmed via ThreadSanitizer to be a real data race.
+/// FSEvents, not a kqueue `DispatchSourceFileSystemObject`: a kqueue source
+/// watches a single directory's *own entries*, but Apple Mail writes new
+/// `.emlx` files several levels below the watched `.mbox` root
+/// (`INBOX.mbox/<UUID>/Data/…/Messages/*.emlx`), which a kqueue on the root
+/// never sees. FSEvents monitors the whole subtree by path prefix. The
+/// classic objection to FSEvents — needing its own run loop — doesn't apply:
+/// `FSEventStreamSetDispatchQueue` delivers straight onto our private queue.
+/// Being path-based (not fd/inode-based) also removes the old
+/// reopen-after-delete dance: a deleted-and-recreated mailbox directory
+/// (e.g. a re-syncing account) keeps reporting events with no re-arm needed,
+/// and a path that doesn't exist yet simply starts reporting when it appears
+/// (the floor `Timer` covers detection either way).
+///
+/// All mutation of `stream`/`debounceWorkItem` is confined to `queue` —
+/// including `start()`/`stop()` themselves, which hop onto it synchronously —
+/// so a caller on any thread (both schedulers are `@MainActor`) can never
+/// race the watcher's own event delivery, which also runs on `queue`.
 final class MailboxWatcher {
-    private var source: DispatchSourceFileSystemObject?
+    private var stream: FSEventStreamRef?
+    /// Retained context handed to the C callback. A weak box, not `self`:
+    /// the callback must never be able to resurrect or dangle a watcher
+    /// whose owner already dropped it.
+    private var contextBox: Unmanaged<WeakBox>?
     private var debounceWorkItem: DispatchWorkItem?
-    private var reopenWorkItem: DispatchWorkItem?
     private let queue = DispatchQueue(label: "com.askmail.mailbox-watch")
     private let debounce: TimeInterval
     private let onChange: () -> Void
+
+    private final class WeakBox {
+        weak var watcher: MailboxWatcher?
+        init(_ watcher: MailboxWatcher) { self.watcher = watcher }
+    }
 
     init(debounce: TimeInterval, onChange: @escaping () -> Void) {
         self.debounce = debounce
         self.onChange = onChange
     }
 
-    /// `path` need not exist yet (a not-yet-synced account) — `open` simply
-    /// fails and the caller's floor `Timer` covers detection until the
-    /// directory appears; there is no retry-until-it-exists loop here.
+    /// `path` need not exist yet (a not-yet-synced account) — FSEvents
+    /// watches by path prefix, so events begin flowing if/when the
+    /// directory appears; there is no retry loop and no failure mode here
+    /// beyond the stream not starting (logged fail-quiet, floor `Timer`
+    /// covers it).
     func start(watching path: String) {
-        queue.sync { openSource(path: path) }
+        queue.sync { openStream(path: path) }
     }
 
-    /// Must only ever run on `queue` — called from `start()` (hopped via
-    /// `queue.sync`) and from `reopenAfterDirectoryChange` (already on `queue`).
-    private func openSource(path: String) {
-        let fd = open(path, O_EVTONLY)
-        guard fd >= 0 else { return }
+    /// Must only ever run on `queue` (called from `start()`, hopped via
+    /// `queue.sync`).
+    private func openStream(path: String) {
+        guard stream == nil else { return }
 
-        let source = DispatchSource.makeFileSystemObjectSource(
-            fileDescriptor: fd, eventMask: [.write, .delete, .rename], queue: queue)
-        source.setEventHandler { [weak self] in
-            guard let self else { return }
-            let flags = source.data
-            if flags.contains(.delete) || flags.contains(.rename) {
-                // The source is bound to the open fd/inode, not the path: if
-                // the directory is deleted and recreated (e.g. re-syncing an
-                // account), this fd's source will never fire for the new
-                // directory's future changes, so re-open explicitly.
-                self.reopenAfterDirectoryChange(path: path)
-                return
-            }
-            self.debounceWorkItem?.cancel()
-            let work = DispatchWorkItem { [weak self] in self?.onChange() }
-            self.debounceWorkItem = work
-            self.queue.asyncAfter(deadline: .now() + self.debounce, execute: work)
+        let box = Unmanaged.passRetained(WeakBox(self))
+        var context = FSEventStreamContext(version: 0,
+                                           info: box.toOpaque(),
+                                           retain: nil,
+                                           release: nil,
+                                           copyDescription: nil)
+        let callback: FSEventStreamCallback = { _, info, _, _, _, _ in
+            guard let info else { return }
+            // Already on `queue` (FSEventStreamSetDispatchQueue below).
+            Unmanaged<WeakBox>.fromOpaque(info).takeUnretainedValue()
+                .watcher?.scheduleDebouncedChange()
         }
-        // Closing only inside the cancel handler (guaranteed to run once all
-        // pending events have drained) avoids a use-after-close race against
-        // an event still being delivered.
-        source.setCancelHandler { close(fd) }
-        self.source = source
-        source.resume()
+        guard let created = FSEventStreamCreate(
+            nil, callback, &context,
+            [path] as CFArray,
+            FSEventStreamEventId(kFSEventStreamEventIdSinceNow),
+            0.2,  // kernel-side coalescing; our own `debounce` does the real gating
+            FSEventStreamCreateFlags(kFSEventStreamCreateFlagNone)) else {
+            box.release()
+            return
+        }
+        FSEventStreamSetDispatchQueue(created, queue)
+        guard FSEventStreamStart(created) else {
+            FSEventStreamInvalidate(created)
+            FSEventStreamRelease(created)
+            box.release()
+            return
+        }
+        stream = created
+        contextBox = box
     }
 
-    /// Runs on `queue` (called only from the event handler above, itself
-    /// scheduled on `queue`). The reopen is a stored, cancelable work item —
-    /// not a bare `asyncAfter` closure — specifically so `stop()` can call it
-    /// off before it fires; an earlier version scheduled a bare closure here,
-    /// so `stop()` during the 1-second reopen window could still silently
-    /// re-arm the watch afterward (confirmed by reproduction).
-    private func reopenAfterDirectoryChange(path: String) {
-        source?.cancel()
-        source = nil
-        let work = DispatchWorkItem { [weak self] in self?.openSource(path: path) }
-        reopenWorkItem = work
-        queue.asyncAfter(deadline: .now() + 1, execute: work)
+    /// Runs on `queue` (event delivery is scheduled there).
+    private func scheduleDebouncedChange() {
+        debounceWorkItem?.cancel()
+        let work = DispatchWorkItem { [weak self] in self?.onChange() }
+        debounceWorkItem = work
+        queue.asyncAfter(deadline: .now() + debounce, execute: work)
     }
 
     func stop() {
-        queue.sync {
-            debounceWorkItem?.cancel()
-            debounceWorkItem = nil
-            reopenWorkItem?.cancel()
-            reopenWorkItem = nil
-            source?.cancel()
-            source = nil
+        queue.sync { teardown() }
+    }
+
+    /// Must only ever run on `queue`. `queue.sync` from `stop()`/`deinit`
+    /// doubles as the barrier that guarantees no callback is mid-flight when
+    /// the stream and its context box are released.
+    private func teardown() {
+        debounceWorkItem?.cancel()
+        debounceWorkItem = nil
+        if let stream {
+            FSEventStreamStop(stream)
+            FSEventStreamInvalidate(stream)
+            FSEventStreamRelease(stream)
+            self.stream = nil
         }
+        contextBox?.release()
+        contextBox = nil
     }
 
     deinit {
-        debounceWorkItem?.cancel()
-        reopenWorkItem?.cancel()
-        source?.cancel()
+        // Safe: the last reference can't be dropped from `queue` itself
+        // (nothing on `queue` retains the watcher — the context box is weak,
+        // the work item captures weak self), so this never deadlocks.
+        queue.sync { teardown() }
     }
 }

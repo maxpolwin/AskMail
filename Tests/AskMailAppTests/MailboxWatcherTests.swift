@@ -1,10 +1,12 @@
 import XCTest
 @testable import AskMailApp
 
-/// Exercises the real `DispatchSource`/fd lifecycle against an actual
-/// temporary directory — there is no existing FSEvents/DispatchSource
-/// precedent anywhere else in this codebase, so this is the only thing
-/// standing between "looks right" and "actually works."
+/// Exercises the real FSEvents stream lifecycle against an actual temporary
+/// directory — there is no other FSEvents precedent anywhere in this
+/// codebase, so this is the only thing standing between "looks right" and
+/// "actually works." The nested-subdirectory test is the load-bearing one:
+/// it pins the reason FSEvents replaced the old single-directory kqueue
+/// source (which never fired for Mail's deep `.emlx` writes).
 final class MailboxWatcherTests: XCTestCase {
 
     func tempDir() throws -> URL {
@@ -75,11 +77,11 @@ final class MailboxWatcherTests: XCTestCase {
         watcher.stop()
     }
 
-    // Regression test for a review-confirmed bug: an earlier version
-    // scheduled the reopen-after-delete/rename as a bare, uncancelable
-    // `asyncAfter` closure, so calling stop() during that ~1s window didn't
-    // actually prevent the watcher from silently re-arming itself afterward.
-    func testStopDuringPendingReopenPreventsTheReopen() throws {
+    // Under the old kqueue implementation this guarded a cancelable-reopen
+    // regression; under FSEvents there is no reopen mechanism at all, and the
+    // invariant it pins is broader: after stop(), NOTHING — not even a
+    // delete + recreate of the watched directory — may produce a callback.
+    func testStopAfterDirectoryDeleteAndRecreateStaysSilent() throws {
         let dir = try tempDir()
         defer { try? FileManager.default.removeItem(at: dir) }
 
@@ -87,24 +89,68 @@ final class MailboxWatcherTests: XCTestCase {
         let watcher = MailboxWatcher(debounce: 0.05) { counter.increment() }
         watcher.start(watching: dir.path)
 
-        // Delete + recreate the watched directory to drive reopenAfterDirectoryChange.
         try FileManager.default.removeItem(at: dir)
         try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
 
-        // Give the delete/rename event a moment to be delivered and schedule
-        // its 1s reopen, then stop() well inside that window.
         RunLoop.current.run(mode: .default, before: Date().addingTimeInterval(0.3))
         watcher.stop()
 
-        // Wait past the reopen's 1s deadline, then write into the
-        // recreated directory -- if the reopen wasn't actually cancelled,
-        // the watcher would have silently re-armed and this write would
-        // still trigger a callback.
         RunLoop.current.run(mode: .default, before: Date().addingTimeInterval(1.5))
         try Data("x".utf8).write(to: dir.appendingPathComponent("1.emlx"))
         RunLoop.current.run(mode: .default, before: Date().addingTimeInterval(0.5))
 
-        XCTAssertEqual(counter.value, 0, "stop() during a pending reopen must actually prevent the reopen")
+        XCTAssertEqual(counter.value, 0, "no callback may fire after stop(), even across delete/recreate")
+    }
+
+    // The reason MailboxWatcher is FSEvents-based at all: Apple Mail writes
+    // new .emlx files several directory levels below the watched .mbox root
+    // (INBOX.mbox/<UUID>/Data/…/Messages/*.emlx). The old kqueue
+    // DispatchSource watched only the root's own entries and never saw
+    // those, so the "fast trigger" never actually fired on real mail.
+    func testFiresForWriteInNestedSubdirectory() throws {
+        let dir = try tempDir()
+        defer { try? FileManager.default.removeItem(at: dir) }
+        let nested = dir.appendingPathComponent("uuid/Data/1/Messages", isDirectory: true)
+        try FileManager.default.createDirectory(at: nested, withIntermediateDirectories: true)
+
+        let expectation = expectation(description: "onChange fired for nested write")
+        let watcher = MailboxWatcher(debounce: 0.2) { expectation.fulfill() }
+        watcher.start(watching: dir.path)
+        // FSEvents stream startup is asynchronous; give it a beat before writing.
+        RunLoop.current.run(mode: .default, before: Date().addingTimeInterval(0.3))
+
+        try Data("x".utf8).write(to: nested.appendingPathComponent("1.emlx"))
+
+        wait(for: [expectation], timeout: 5)
+        watcher.stop()
+    }
+
+    // Path-based FSEvents keeps reporting after the watched directory is
+    // deleted and recreated (a re-syncing account) — the old fd-based
+    // implementation needed an explicit reopen dance for this.
+    func testKeepsWatchingAfterDirectoryDeleteAndRecreate() throws {
+        let dir = try tempDir()
+        defer { try? FileManager.default.removeItem(at: dir) }
+
+        let counter = CallCounter()
+        let watcher = MailboxWatcher(debounce: 0.1) { counter.increment() }
+        watcher.start(watching: dir.path)
+        RunLoop.current.run(mode: .default, before: Date().addingTimeInterval(0.3))
+
+        try FileManager.default.removeItem(at: dir)
+        try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+        RunLoop.current.run(mode: .default, before: Date().addingTimeInterval(0.5))
+
+        counter.resetToZero()
+        try Data("x".utf8).write(to: dir.appendingPathComponent("1.emlx"))
+
+        let deadline = Date().addingTimeInterval(3)
+        while counter.value == 0, Date() < deadline {
+            RunLoop.current.run(mode: .default, before: Date().addingTimeInterval(0.05))
+        }
+        XCTAssertGreaterThan(counter.value, 0,
+                             "a write after delete/recreate must still trigger a callback")
+        watcher.stop()
     }
 }
 
@@ -115,4 +161,5 @@ private final class CallCounter: @unchecked Sendable {
     private let lock = NSLock()
     private(set) var value = 0
     func increment() { lock.lock(); value += 1; lock.unlock() }
+    func resetToZero() { lock.lock(); value = 0; lock.unlock() }
 }
