@@ -66,6 +66,33 @@ enum Mime {
             }
             return contentType.name
         }
+
+        /// Upper bound on `decodedBody.count`, computed from the
+        /// still-*encoded* body without performing the decode (hardening
+        /// H-7). This lets a caller reject an oversize attachment before
+        /// the allocating decode step, closing a base64/quoted-printable
+        /// "expansion bomb" (a small encoded payload that decodes to a huge
+        /// one) rather than only catching it after the allocation already
+        /// happened. The bound per encoding:
+        ///   - base64: 4 encoded chars decode to 3 bytes, so
+        ///     `decoded <= encoded * 3/4`.
+        ///   - quoted-printable: every decoded byte consumes >= 1 encoded
+        ///     char (literal bytes are 1:1, `=XX` escapes are 3:1), so
+        ///     `decoded <= encoded`.
+        ///   - identity (no/unrecognized Content-Transfer-Encoding):
+        ///     `decodedBody` is exactly the raw UTF-8 bytes, so
+        ///     `decoded == encoded`.
+        var maxDecodedByteEstimate: Int {
+            let encoding = (header("Content-Transfer-Encoding") ?? "")
+                .trimmingCharacters(in: .whitespaces).lowercased()
+            let encodedSize = rawBody.utf8.count
+            switch encoding {
+            case "base64":
+                return (encodedSize * 3) / 4
+            default:
+                return encodedSize
+            }
+        }
     }
 
     // MARK: Header parsing

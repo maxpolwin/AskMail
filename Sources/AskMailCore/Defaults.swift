@@ -103,6 +103,28 @@ public enum Defaults {
     /// just multiplied the KV-cache allocation with no quality benefit.
     public static let embedNumCtx = 4096
     public static let maxAttachmentBytes = 25 * 1024 * 1024
+    /// Hard ceiling on a single `.emlx` file's on-disk size, checked (via
+    /// `FileManager` attributes) BEFORE `Data(contentsOf:)` ever reads the
+    /// file (hardening H-7) — an oversize file is rejected without being
+    /// pulled into memory at all. Sized generously above the worst
+    /// legitimate case: `maxAttachmentBytes` (25 MB) per attachment, times
+    /// ~4/3 for base64 expansion, times a handful of attachments in one
+    /// message, plus headroom for headers/multipart boundary overhead.
+    public static let maxEmlxBytes = 100 * 1024 * 1024
+    /// Hard ceiling on `multipart/*` nesting depth in the MIME walk
+    /// (hardening H-8). A hostile message can nest multipart parts
+    /// arbitrarily deep; each level recurses in
+    /// `EmlxParser.collectContent`, so unbounded depth is a stack-overflow
+    /// DoS. 32 is far beyond anything a real mail client produces (typical
+    /// nesting is single digits).
+    public static let maxMimeDepth = 32
+    /// Hard ceiling on the HTML byte length handed to `HtmlText.plainText`
+    /// (hardening H-9). Input beyond this is truncated, not rejected — a
+    /// giant legitimate newsletter should still index its head rather than
+    /// fail ingestion outright — while a hostile payload crafted to stress
+    /// the regex passes is bounded to a fixed amount of work regardless of
+    /// how large the underlying message claims to be.
+    public static let maxHtmlBytes = 2 * 1024 * 1024
 
     // MARK: Logging
     public static let logRetentionHours: Double = 12
