@@ -8,6 +8,7 @@ struct SettingsView: View {
     @ObservedObject private var vectorizer = Vectorizer.shared
     @ObservedObject private var engine = OllamaEngine.shared
     @ObservedObject private var remote = RemoteModelDirectory.shared
+    @ObservedObject private var draftEngine = DraftEngine.shared
     @State private var ollamaCloudKey = ""
     @State private var mistralKey = ""
     @State private var keysStatus = ""
@@ -175,6 +176,19 @@ struct SettingsView: View {
                     Text(statusMessage).font(.caption).foregroundStyle(.secondary)
                 }
                 Text("New mail is vectorized automatically every hour while on power. Only new or changed messages are processed.")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+            }
+
+            Section("Draft-Modus") {
+                Toggle("Draft-Modus", isOn: $settings.draftModeEnabled)
+                if settings.draftModeEnabled {
+                    Toggle("Allow while on battery", isOn: $settings.draftAllowOnBattery)
+                    Text(draftStatusLine)
+                        .font(.callout)
+                        .foregroundStyle(.secondary)
+                }
+                Text("Quietly drafts replies to ordinary inbox mail in the background, using only the local model \u{2014} never a cloud provider, regardless of the Q&A provider chosen above. A draft is never sent, inserted, or written into Apple Mail automatically: open \u{201C}Drafts\u{201D} from the menu bar to review, copy, or discard one yourself.")
                     .font(.caption)
                     .foregroundStyle(.secondary)
             }
@@ -371,6 +385,7 @@ struct SettingsView: View {
             refreshSavedKeys()
             launchAtLogin = LoginItem.isEnabled   // reflect external changes
             vectorizer.refreshFailedCount()
+            draftEngine.refreshCounts()
             Task { await engine.refresh() }
             Task { await remote.refresh(for: settings.provider) }
         }
@@ -561,6 +576,17 @@ struct SettingsView: View {
             return Int(installed.sizeBytes / 1_000_000)
         }
         return ModelCatalog.chat.first { $0.id == settings.localChatModel }?.approxSizeMB ?? 4700
+    }
+
+    /// Draft-Modus's background-activity line (DM-12 status surfacing):
+    /// queued / drafted / skipped, plus failed only when non-zero so a
+    /// healthy run doesn't show a permanent "Failed 0".
+    private var draftStatusLine: String {
+        var line = "Queued \(draftEngine.pendingCount) \u{00B7} Drafted \(draftEngine.readyCount) \u{00B7} Skipped \(draftEngine.skippedCount)"
+        if draftEngine.failedCount > 0 {
+            line += " \u{00B7} Failed \(draftEngine.failedCount)"
+        }
+        return line
     }
 
     /// Human-readable name of the selected provider, for the privacy note.

@@ -9,7 +9,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private var panel: PanelController?
     private var statusItem: NSStatusItem?
     private var settingsWindow: NSWindow?
+    private var draftsWindow: NSWindow?
     private var askMenuItem: NSMenuItem?
+    private var draftsMenuItem: NSMenuItem?
     private var scheduler: VectorizationScheduler?
     private var draftScheduler: DraftScheduler?
     private var cancellables = Set<AnyCancellable>()
@@ -38,6 +40,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         installMainMenu()
         setUpStatusItem()
         observeHotkeyChanges()
+        observeDraftCounts()
 
         // Hourly incremental vectorization while on AC power (FR-5), plus a
         // catch-up at launch. Manual runs stay available in Settings (FR-6).
@@ -99,6 +102,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         let ask = NSMenuItem(title: askMenuTitle(), action: #selector(togglePanel), keyEquivalent: "")
         menu.addItem(ask)
         askMenuItem = ask
+        // Draft-Modus surfacing (Task 2): always present, even before the
+        // feature is ever turned on -- the count is simply 0 until it is.
+        let drafts = NSMenuItem(title: draftsMenuTitle(), action: #selector(openDraftsWindow), keyEquivalent: "")
+        menu.addItem(drafts)
+        draftsMenuItem = drafts
         menu.addItem(withTitle: "Settings\u{2026}", action: #selector(openSettings), keyEquivalent: ",")
         menu.addItem(.separator())
         menu.addItem(withTitle: "Quit AskMail", action: #selector(NSApplication.terminate(_:)), keyEquivalent: "q")
@@ -113,6 +121,22 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         let combo = ShortcutSymbols.display(carbonModifiers: settings.hotkeyModifiers,
                                             keyLabel: settings.hotkeyKeyLabel)
         return "Ask (\(combo))"
+    }
+
+    private func draftsMenuTitle() -> String {
+        "Drafts (\(DraftEngine.shared.readyCount))"
+    }
+
+    /// Keeps the "Drafts (n)" menu title in sync with `DraftEngine`'s own
+    /// count-refresh mechanism (after every tick, and whenever the Drafts or
+    /// Settings window appears) instead of polling on a separate timer.
+    private func observeDraftCounts() {
+        DraftEngine.shared.$readyCount
+            .receive(on: RunLoop.main)
+            .sink { [weak self] count in
+                self?.draftsMenuItem?.title = "Drafts (\(count))"
+            }
+            .store(in: &cancellables)
     }
 
     /// Re-register the global hotkey (and refresh the menu label) whenever the
@@ -171,6 +195,25 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             settingsWindow = window
         }
         settingsWindow?.makeKeyAndOrderFront(nil)
+        NSApp.activate(ignoringOtherApps: true)
+    }
+
+    @objc private func openDraftsWindow() {
+        if draftsWindow == nil {
+            let window = NSWindow(
+                contentRect: NSRect(x: 0, y: 0, width: 560, height: 640),
+                styleMask: [.titled, .closable, .miniaturizable],
+                backing: .buffered,
+                defer: false
+            )
+            window.title = "AskMail Drafts"
+            window.contentView = NSHostingView(rootView: DraftsView())
+            window.isReleasedWhenClosed = false
+            window.center()
+            draftsWindow = window
+        }
+        DraftEngine.shared.refreshCounts()
+        draftsWindow?.makeKeyAndOrderFront(nil)
         NSApp.activate(ignoringOtherApps: true)
     }
 }

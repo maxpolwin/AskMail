@@ -233,6 +233,102 @@ public final class DraftStore {
         return result
     }
 
+    // MARK: Drafts surfacing (Phase 4, docs/draft-modus-plan.md)
+
+    /// Ready drafts, newest-first -- backs the read-only Drafts window
+    /// (recipient/subject/date/body, never auto-sent or auto-inserted per
+    /// `docs/draft-contract.md`). `limit` bounds a pathological backlog from
+    /// rendering an unbounded list.
+    public func readyDrafts(limit: Int = 200) throws -> [DraftRecord] {
+        lock.lock(); defer { lock.unlock() }
+        var results: [DraftRecord] = []
+        try query("""
+        SELECT pk, thread_id, latest_message_id, sender, subject, draft_text, generated_at, status
+        FROM drafts WHERE status = 'ready' ORDER BY generated_at DESC LIMIT ?
+        """) { statement in
+            sqlite3_bind_int(statement, 1, Int32(limit))
+        } row: { statement in
+            results.append(DraftRecord(
+                pk: sqlite3_column_int64(statement, 0),
+                threadID: column(statement, 1),
+                latestMessageID: column(statement, 2),
+                sender: column(statement, 3),
+                subject: column(statement, 4),
+                draftText: column(statement, 5),
+                generatedAt: sqlite3_column_int64(statement, 6),
+                status: DraftStatus(rawValue: column(statement, 7)) ?? .pending
+            ))
+        }
+        return results
+    }
+
+    /// Ready drafts generated after a previous notification cursor
+    /// (exclusive, oldest-first) -- lets `DraftEngine` notify exactly once
+    /// per newly-ready draft instead of re-scanning `status = 'ready'` and
+    /// guessing which ones are new.
+    public func readyDrafts(sincePk cursor: Int64) throws -> [DraftRecord] {
+        lock.lock(); defer { lock.unlock() }
+        var results: [DraftRecord] = []
+        try query("""
+        SELECT pk, thread_id, latest_message_id, sender, subject, draft_text, generated_at, status
+        FROM drafts WHERE status = 'ready' AND pk > ? ORDER BY pk ASC
+        """) { statement in
+            sqlite3_bind_int64(statement, 1, cursor)
+        } row: { statement in
+            results.append(DraftRecord(
+                pk: sqlite3_column_int64(statement, 0),
+                threadID: column(statement, 1),
+                latestMessageID: column(statement, 2),
+                sender: column(statement, 3),
+                subject: column(statement, 4),
+                draftText: column(statement, 5),
+                generatedAt: sqlite3_column_int64(statement, 6),
+                status: DraftStatus(rawValue: column(statement, 7)) ?? .pending
+            ))
+        }
+        return results
+    }
+
+    /// The highest `pk` among `ready` drafts, or 0 if there are none --
+    /// bootstraps the notification cursor above so enabling Draft-Modus (or
+    /// upgrading into this phase) with pre-existing ready rows doesn't
+    /// notify for all of them retroactively in one burst.
+    public func maxReadyDraftPk() throws -> Int64 {
+        lock.lock(); defer { lock.unlock() }
+        var result: Int64 = 0
+        try query("SELECT COALESCE(MAX(pk), 0) FROM drafts WHERE status = 'ready'") { _ in
+        } row: { statement in
+            result = sqlite3_column_int64(statement, 0)
+        }
+        return result
+    }
+
+    /// Count of `ready` drafts -- the menu bar "Drafts (n)" badge and
+    /// Settings' "Drafted" status figure (DM-12 surfacing, extended to this
+    /// phase's actual output).
+    public func readyDraftCount() throws -> Int {
+        lock.lock(); defer { lock.unlock() }
+        var result = 0
+        try query("SELECT COUNT(*) FROM drafts WHERE status = 'ready'") { _ in
+        } row: { statement in
+            result = Int(sqlite3_column_int64(statement, 0))
+        }
+        return result
+    }
+
+    /// Deletes one draft row (the Drafts window's "Discard" action). This is
+    /// the only way a `drafts` row leaves the database before the 14-day
+    /// retention purge -- read-only surfacing never writes back to Apple
+    /// Mail, so discarding here only ever forgets AskMail's own local copy.
+    @discardableResult
+    public func deleteDraft(pk: Int64) throws -> Bool {
+        lock.lock(); defer { lock.unlock() }
+        try run("DELETE FROM drafts WHERE pk = ?") { statement in
+            sqlite3_bind_int64(statement, 1, pk)
+        }
+        return sqlite3_changes(db) > 0
+    }
+
     // MARK: Style learning (Phase 3, docs/style-learning-contract.md)
 
     /// Draft rows `StyleLearner` hasn't yet learned from (`style_learned_at
@@ -389,6 +485,22 @@ public final class DraftStore {
     /// with `SQLiteStore.failedIngestCount`.
     public func pendingAndFailedCounts() throws -> (pending: Int, failed: Int) {
         (try jobCount(state: .pending), try jobCount(state: .failed))
+    }
+
+    /// Job rows that will never be drafted -- newsletter/bulk mail
+    /// (`newsletterSkipped`) plus RFC 3834 auto-generated mail
+    /// (`autoGenerated`) -- combined into one figure for Settings' "Skipped"
+    /// status (DM-12/Phase 6 surfacing). `classifyPendingJobs` keeps the two
+    /// states distinct internally (so a later UI could explain *why*), but
+    /// they share the same user-facing meaning here.
+    public func skippedJobCount() throws -> Int {
+        lock.lock(); defer { lock.unlock() }
+        var result = 0
+        try query("SELECT COUNT(*) FROM draft_jobs WHERE state IN ('newsletter_skipped', 'auto_generated')") { _ in
+        } row: { statement in
+            result = Int(sqlite3_column_int64(statement, 0))
+        }
+        return result
     }
 
     private func jobCount(state: DraftJobState) throws -> Int {
