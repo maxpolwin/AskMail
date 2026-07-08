@@ -252,7 +252,7 @@ final class VectorizationScheduler {
     /// (`AskMailCore`, internal to that module so not importable here). Sent
     /// matters alongside Inbox because Draft-Modus's `StyleLearner` reads the
     /// user's own sent replies out of this same index.
-    private static let watchedMailboxNames: Set<String> = [
+    private nonisolated static let watchedMailboxNames: Set<String> = [
         "inbox", "sent", "sent messages", "sent items",
     ]
 

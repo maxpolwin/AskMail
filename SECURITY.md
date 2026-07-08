@@ -10,6 +10,14 @@ selected one.
 - The full mailbox and the vector DB never leave the device.
 - On cloud routing, only the retrieved top-k chunks for a single query are
   sent to the selected provider, plus the question and system prompt.
+- Enforced in code, not just documented (hardening H-10/H-11): a compiled-in
+  egress allowlist (loopback, `ollama.com`, `api.mistral.ai`) fronts every
+  outbound request; embeddings are structurally loopback-only; every cloud
+  send is recorded at request initiation in a session egress log, shown live
+  in the panel and audited in Settings.
+- Draft-Modus is local-only by construction: drafting, classification, and
+  style learning never use the configured cloud provider, and a draft is
+  never auto-sent or inserted into Mail.
 - v1 has no PII redaction and no sender exclusion (both land in v1.1). This
   is an accepted, documented gap. Do not point v1 at a mailbox with highly
   sensitive correspondence.
@@ -25,7 +33,9 @@ selected one.
 - The Mail envelope index is opened READ-ONLY. Never written. Corruption
   forces a multi-hour Mail rebuild.
 - `.emlx` and PDF parsing operate on untrusted input. Fail closed on parse
-  errors; never execute or follow embedded content. Cap attachment size.
+  errors; never execute or follow embedded content. Caps are enforced before
+  work is done (H-7/H-8/H-9): file size before read, attachment size before
+  decode, MIME nesting depth, and HTML length before any regex pass.
 - That parsing — including the PDFKit call, given PDF/CoreGraphics parsers'
   history of memory-corruption bugs — runs in a sandboxed, non-FDA,
   no-network XPC child process, not in the app holding Full Disk Access and

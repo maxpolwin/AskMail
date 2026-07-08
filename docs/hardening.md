@@ -31,9 +31,19 @@ check passes. Verification commands are collected in the
 | H-4 No `--deep`, inside-out signing | ✅ Implemented. Packaging/build-app.sh signs the XPC service, then the app; `--deep` is gone. |
 | H-5 Fix dev-signing key ACL | ✅ Implemented. Packaging/setup-signing.sh uses `-T /usr/bin/codesign` (not `-A`) and a random per-run passphrase. |
 | H-6 XPC parser isolation | ✅ Implemented and end-to-end verified (see below) — new `Sources/AskMailParserXPC` target, sandboxed, embedded and inside-out signed. |
+| H-7 Size caps before read/decode | ✅ Implemented. `Defaults.maxEmlxBytes` checked via `FileManager` attributes before `Data(contentsOf:)`; attachment cap enforced on the *encoded* size (`Mime.Part.maxDecodedByteEstimate`) before decode, with the old post-decode check kept as defense in depth. Tests in ParserHardeningTests. |
+| H-8 MIME recursion depth limit | ✅ Implemented. `Defaults.maxMimeDepth` (32) threaded through `EmlxParser.collectContent`; exceeding it fails the parse closed. |
+| H-9 Bounded regex passes | ✅ Implemented. `Defaults.maxHtmlBytes` (2 MB, UTF-8-boundary-safe truncation) before any pass; all `HtmlText` regexes precompiled; two real catastrophic-backtracking shapes found empirically and fixed (see HtmlText.swift's pattern notes). |
+| H-10 Egress allowlist | ✅ Implemented. [EgressPolicy.swift](../Sources/AskMailCore/EgressPolicy.swift) — loopback + `ollama.com` + `api.mistral.ai`, checked before any bytes on every URLSession call in Providers.swift/OllamaControl.swift; `OllamaEmbedder` is loopback-only structurally. |
+| H-11 Egress transparency | ✅ Implemented. `EgressLog` records at request *initiation* (survives a local race win); `ChatEvent.egress` drives a live indicator in the ask panel; Settings shows the session's auditable "what left, when, to whom" table. |
+| H-13 Redact provider error bodies | ✅ Implemented. `ProviderError.description` caps `.http` bodies at 300 chars, single-line; the raw body stays in the associated value for programmatic use only. |
 | H-14 Answer-link scheme allowlist | ✅ Implemented. [LinkPolicy.swift](../Sources/AskMailCore/LinkPolicy.swift) + wiring in AskView.swift; 8 unit tests. |
+| H-15 Context/instruction separation | ✅ Implemented. `PromptAssembler.renderChunk` wraps each chunk in `BEGIN EMAIL [N]` / `END EMAIL [N]`; `Defaults.defaultSystemPrompt` rule 2 declares wrapped content data-not-instructions; contract §3 updated in lockstep. |
+| H-16 Keychain device-bound + data-protection | ✅ Implemented with graceful fallback. Data-protection keychain (`WhenUnlockedThisDeviceOnly`) attempted first; `errSecMissingEntitlement` (dev-signed builds) falls back to the legacy keychain transparently, with verified-readback migration when DP becomes available. |
+| H-18 Lock down the mailbox-mirror DB | ✅ Implemented (predates this pass). `FileHardening.lockDown` on both `askmail.db` and `drafts.db` at every open: 0600/0700, Time Machine + Spotlight excluded. An existing DB created by an older build self-heals on next open. |
+| H-20 Verify the Ollama binary | ✅ Implemented. [BinarySignature.swift](../Sources/AskMailCore/BinarySignature.swift) (`anchor apple` or Developer ID) gates `OllamaEngine.startOllama()`; refusal is actionable and unit-tested. |
 | H-23 Default log level | ✅ Implemented. `SettingsStore`/`RollingLog` both default to `.info`; the one `.info`-level line with user text is now capped at 200 chars. |
-| H-7 – H-13, H-15 – H-22 | Open — not in this pass. |
+| H-12, H-17, H-19, H-21, H-22 | Open. TLS pinning (H-12), code-signature Keychain ACL (H-17), FDA onboarding copy (H-19), CI-enforced scans (H-21), provenance doc (H-22). |
 
 **H-6 in detail:** `Sources/AskMailParserXPC` is a new sandboxed executable
 target (`com.apple.security.app-sandbox=true`, no other entitlement) that

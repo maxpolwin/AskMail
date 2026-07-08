@@ -82,6 +82,22 @@ Done and under test:
   catch-up at launch and on plug-in. Incremental — a per-file fingerprint
   (ROWID + mod-time/size) skips unchanged messages, so runs process only new or
   changed mail and resume after a crash. Embedder retries transient failures.
+- Fresh-mail fast path: an FSEvents watcher on the Inbox/Sent trees triggers a
+  debounced incremental run, so new mail is searchable in about a minute on AC
+  power (the hourly timer stays the backstop).
+- Draft-Modus (docs/draft-modus-plan.md phases 1–4): background classification
+  and local-only reply drafting for ordinary inbox mail, style learning from
+  actually-sent replies, a Settings toggle, a read-only Drafts window
+  (copy / open thread in Mail / discard — never auto-sent or inserted), and a
+  best-effort notification when a draft is ready.
+- Egress control (hardening H-10/H-11): a compiled-in host allowlist in front
+  of every outbound request, embeddings structurally loopback-only, a live
+  "sent to <host>" indicator in the panel, and a per-session egress audit
+  table in Settings.
+- Parser hardening (H-7/H-8/H-9): size caps before read and before decode,
+  MIME recursion depth limit, bounded + precompiled HTML regex passes.
+- Chat requests survive cold model loads (180 s idle timeout + one connect
+  retry) instead of failing the first query after a model reload.
 
 Open (tracked against docs/definition-of-done.md):
 - Envelope-index column names must be validated against a real V10 index

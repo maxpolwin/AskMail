@@ -360,6 +360,36 @@ struct SettingsView: View {
                     .foregroundStyle(.secondary)
             }
 
+            // H-11's auditable half: the live panel indicator shows an egress
+            // as it happens; this table answers "what left, when, to whom"
+            // after the fact. Session-scoped and memory-only, mirroring the
+            // rolling debug log's posture.
+            Section("Cloud egress (this session)") {
+                let events = EgressLog.shared.events().suffix(20).reversed()
+                if events.isEmpty {
+                    Text("Nothing has left this Mac. Egress only happens when a cloud provider is selected; each send is your question plus the retrieved email excerpts for that one query.")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                } else {
+                    ForEach(Array(events.enumerated()), id: \.offset) { _, event in
+                        HStack(alignment: .firstTextBaseline) {
+                            Text(event.date, format: .dateTime.month().day().hour().minute())
+                                .font(.caption.monospacedDigit())
+                                .foregroundStyle(.secondary)
+                            Text("\(event.host) \u{00B7} \(event.model)")
+                                .font(.caption)
+                            Spacer()
+                            Text("\(event.promptChars) chars")
+                                .font(.caption.monospacedDigit())
+                                .foregroundStyle(.secondary)
+                        }
+                    }
+                    Text("Each row is one request that carried your question and retrieved email excerpts to the named host (recorded when the request started, even if a local answer won the race).")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                }
+            }
+
             Section("Diagnostics") {
                 Picker("Log level", selection: $settings.logLevel) {
                     ForEach(RollingLog.LogLevel.allCases, id: \.self) { level in
