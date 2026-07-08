@@ -425,16 +425,22 @@ public enum DateFilter {
         return nil
     }
 
+    /// Matches every ISO (`YYYY-MM-DD`), German/EU dotted (`DD.MM.YYYY`), and
+    /// slashed (`MM/DD/YYYY` or `DD/MM/YYYY`) date-shaped token sequence.
+    /// Shared by `hasDroppedNumericDateAttempt` and `allNumericDateRanges`;
+    /// the pattern is a fixed literal, so it's compiled once rather than per
+    /// call.
+    private static let numericDateRegex = try! NSRegularExpression(
+        pattern: #"(\d{4})-(\d{1,2})-(\d{1,2})|(\d{1,2})\.(\d{1,2})\.(\d{4})|(\d{1,2})/(\d{1,2})/(\d{4})"#)
+
     /// True if the question contains a numeric-date-shaped token sequence
     /// that failed to resolve into an actual date (dropped for ambiguity or
     /// invalidity by `allNumericDateRanges`). See the call site in
     /// `unixRange` for why this must short-circuit the broader fallback
     /// tiers rather than let their digits be reinterpreted more loosely.
     private static func hasDroppedNumericDateAttempt(question: String, calendar: Calendar) -> Bool {
-        let pattern = #"(\d{4})-(\d{1,2})-(\d{1,2})|(\d{1,2})\.(\d{1,2})\.(\d{4})|(\d{1,2})/(\d{1,2})/(\d{4})"#
-        guard let regex = try? NSRegularExpression(pattern: pattern) else { return false }
         let fullRange = NSRange(question.startIndex..., in: question)
-        let rawMatchCount = regex.numberOfMatches(in: question, range: fullRange)
+        let rawMatchCount = numericDateRegex.numberOfMatches(in: question, range: fullRange)
         guard rawMatchCount > 0 else { return false }
         return allNumericDateRanges(question: question, calendar: calendar).count < rawMatchCount
     }
@@ -447,11 +453,9 @@ public enum DateFilter {
     /// EU/UK convention and is dropped rather than guessed — see
     /// `disambiguateSlashDate`.
     private static func allNumericDateRanges(question: String, calendar: Calendar) -> [ClosedRange<Int64>] {
-        let pattern = #"(\d{4})-(\d{1,2})-(\d{1,2})|(\d{1,2})\.(\d{1,2})\.(\d{4})|(\d{1,2})/(\d{1,2})/(\d{4})"#
-        guard let regex = try? NSRegularExpression(pattern: pattern) else { return [] }
         let fullRange = NSRange(question.startIndex..., in: question)
 
-        return regex.matches(in: question, range: fullRange).compactMap { match -> ClosedRange<Int64>? in
+        return numericDateRegex.matches(in: question, range: fullRange).compactMap { match -> ClosedRange<Int64>? in
             func int(_ groupIndex: Int) -> Int? {
                 guard let range = Range(match.range(at: groupIndex), in: question) else { return nil }
                 return Int(question[range])
