@@ -183,12 +183,55 @@ private struct RelevanceBar: View {
     }
 }
 
+/// Pure gate for `AskViewModel`'s per-token publish throttle. `styledAnswer`
+/// (below) re-parses the whole Markdown string and rescans every character
+/// for superscripts on each publish — O(answer length), all on the main
+/// actor — so publishing the streamed `answer` on every token makes a long
+/// answer quadratic to render. A plain, injectable-clock struct (no
+/// Timer/Task of its own) keeps the decision inline in the existing event
+/// loop and makes it directly unit-testable.
+struct StreamThrottle {
+    /// ~10 publishes/sec: streaming still reads as smooth, but re-render
+    /// cost stops scaling with token count.
+    var interval: Duration = .milliseconds(100)
+    private var lastPublish: ContinuousClock.Instant?
+
+    /// True on the first call, or once `interval` has elapsed since the
+    /// last publish; either way `now` becomes the new last-publish time.
+    mutating func shouldPublish(now: ContinuousClock.Instant = ContinuousClock.now) -> Bool {
+        if let lastPublish, now - lastPublish < interval { return false }
+        lastPublish = now
+        return true
+    }
+
+    /// Records `now` as a publish without consulting `interval` — for the
+    /// unconditional flushes (`.fallback`, `.done`, error/termination) so
+    /// the next token's gate is measured from the real last UI update.
+    mutating func markPublished(now: ContinuousClock.Instant = ContinuousClock.now) {
+        lastPublish = now
+    }
+
+    /// Drops the last-publish time so the very next token publishes
+    /// immediately — used when a fresh stream starts.
+    mutating func reset() {
+        lastPublish = nil
+    }
+}
+
 @MainActor
 final class AskViewModel: NSObject, ObservableObject {
     @Published var question = ""
     @Published var answer = ""
     @Published var sources: [(number: Int, ref: SourceRef)] = []
     @Published var warning: String?
+    /// Hardening H-11: the cloud host named by a `.egress` event — the
+    /// question + retrieved mail excerpts have left the device to that host,
+    /// set the instant the event arrives regardless of which provider's
+    /// answer ultimately wins the race (see `ChatEvent.egress`). Cleared on
+    /// every new `submit()` and on `endSession()`. Kept out of `answer`/
+    /// `warning` so it's never folded into the spoken (VoiceOver/`speak()`)
+    /// answer text.
+    @Published var egressHost: String?
     @Published var isStreaming = false
     /// True while `speak()`'s utterance is playing. Drives the Speak/Stop
     /// button (only shown when Settings ▸ Accessibility ▸ "Speak answer
@@ -202,6 +245,9 @@ final class AskViewModel: NSObject, ObservableObject {
     /// resubmission (or a dismiss) drops its late results silently.
     private var generation = 0
     private let speechSynthesizer = AVSpeechSynthesizer()
+    /// Gates how often streamed tokens are actually published to `answer`;
+    /// reset at the start of every `submit()`.
+    private var throttle = StreamThrottle()
 
     override init() {
         super.init()
@@ -229,43 +275,39 @@ final class AskViewModel: NSObject, ObservableObject {
         isSpeaking = false
     }
 
+    /// Cancels any in-flight query, bumps `generation`, and resets
+    /// per-submission UI state — including the H-11 `egressHost` indicator
+    /// and the token-publish throttle — for the run about to start. Returns
+    /// the new generation token. Split out of `submit` so this reset is
+    /// directly testable without spinning up the async query task (which
+    /// opens the real on-disk database and calls out to the configured
+    /// provider).
+    func beginNewGeneration() -> Int {
+        currentTask?.cancel()  // a resubmission supersedes any in-flight query
+        generation += 1
+        answer = ""
+        sources = []
+        warning = nil
+        egressHost = nil
+        isStreaming = true
+        throttle.reset()
+        return generation
+    }
+
     func submit() {
         let text = question.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !text.isEmpty else { return }
         if isSpeaking { stopSpeaking() }  // a resubmission shouldn't talk over the new answer
-        // A resubmission supersedes any in-flight query: cancel it and rerun.
-        currentTask?.cancel()
-        generation += 1
-        let gen = generation
-        answer = ""
-        sources = []
-        warning = nil
-        isStreaming = true
+        let gen = beginNewGeneration()
 
         currentTask = Task {
+            var raw = ""
             do {
                 let service = try service()
                 let result = try await service.ask(text, settings: SettingsStore.shared.querySettings())
-                var raw = ""
                 for try await event in result.events {
                     guard gen == generation else { return }  // superseded by a newer run
-                    switch event {
-                    case .token(let token):
-                        raw += token
-                        answer = raw  // stream verbatim; superscripts land on completion
-                    case .fallback(let provider, _):
-                        raw = ""
-                        answer = ""
-                        warning = "Cloud provider failed; answered by \(provider) instead."
-                    case .egress:
-                        // H-11 egress transparency: recorded in EgressLog at
-                        // request-initiation time regardless of this switch;
-                        // the auditable "what left, when, to whom" view is a
-                        // separate, later UI change (not this pass).
-                        break
-                    case .done:
-                        break
-                    }
+                    apply(event, raw: &raw)
                 }
                 guard gen == generation else { return }
                 // Post-process the completed answer, not mid-stream
@@ -278,6 +320,7 @@ final class AskViewModel: NSObject, ObservableObject {
                 sources = rendered.sources
             } catch let error as ProviderError {
                 guard gen == generation else { return }  // don't surface a superseded run's error
+                answer = raw  // flush any tokens the throttle was still withholding
                 RollingLog.shared.log("query failed: \(error)", level: .error)
                 // The missing-model message is already a full, actionable
                 // sentence — show it as-is rather than burying it after a prefix.
@@ -288,6 +331,7 @@ final class AskViewModel: NSObject, ObservableObject {
                 }
             } catch {
                 guard gen == generation else { return }
+                answer = raw  // flush any tokens the throttle was still withholding
                 RollingLog.shared.log("query failed: \(error)", level: .error)
                 // A raw URLError (connection refused/timed out) means Ollama
                 // isn't installed or isn't running — tell the user that
@@ -300,6 +344,38 @@ final class AskViewModel: NSObject, ObservableObject {
             }
             guard gen == generation else { return }
             isStreaming = false
+        }
+    }
+
+    /// Applies one streamed `ChatEvent` to view-model state: accumulates the
+    /// token into `raw` and publishes `answer` at most every `throttle`
+    /// interval; records the H-11 egress host unconditionally (never
+    /// throttled — it must appear the instant it arrives, even if a local
+    /// answer ends up winning the race); resets on `.fallback`; and
+    /// unconditionally flushes `raw` on `.done` so the published answer never
+    /// trails the last token. Not private: exercised directly by
+    /// `AskMailAppTests` without needing a real `QueryService`, since
+    /// `ChatEvent` is a plain `Sendable`/`Equatable` enum.
+    func apply(_ event: ChatEvent, raw: inout String) {
+        switch event {
+        case .token(let token):
+            raw += token
+            if throttle.shouldPublish() {
+                answer = raw
+            }
+        case .fallback(let provider, _):
+            raw = ""
+            answer = ""
+            warning = "Cloud provider failed; answered by \(provider) instead."
+            throttle.reset()
+        case .egress(let host):
+            // H-11 egress transparency: recorded in EgressLog at
+            // request-initiation time regardless of this switch; surfaced
+            // here so the panel shows it live too.
+            egressHost = host
+        case .done:
+            answer = raw  // unconditional final flush — never trails behind raw
+            throttle.markPublished()
         }
     }
 
@@ -337,6 +413,7 @@ final class AskViewModel: NSObject, ObservableObject {
         answer = ""
         sources = []
         warning = nil
+        egressHost = nil
         isStreaming = false
     }
 
@@ -483,6 +560,23 @@ struct AskView: View {
                     Label(warning, systemImage: "exclamationmark.triangle")
                         .font(.callout)
                         .foregroundStyle(.orange)  // color-blind-safe warning hue
+                }
+
+                // H-11 egress transparency: shown the instant `.egress` arrives,
+                // independent of whether the eventual answer came from the
+                // cloud or a local fallback that won the race (see
+                // AskViewModel.apply) — the question + retrieved excerpts
+                // already left the device either way. Deliberately unobtrusive
+                // (secondary text, no alert) but always visible, matching the
+                // warning line's placement and sizing rather than its urgency.
+                if let egressHost = model.egressHost {
+                    Label("Question and retrieved email excerpts sent to \(egressHost)", systemImage: "cloud")
+                        .font(.callout)
+                        .foregroundStyle(.secondary)
+                        // The answer text is also read aloud by speak()/VoiceOver;
+                        // this indicator is a separate line, so its accessibility
+                        // label stands alone rather than folding into the answer.
+                        .accessibilityLabel("Question and retrieved email excerpts were sent to \(egressHost)")
                 }
             }
             .background(GeometryReader { geo in
