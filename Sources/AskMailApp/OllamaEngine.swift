@@ -61,6 +61,18 @@ final class OllamaEngine: ObservableObject {
                                                configuration: NSWorkspace.OpenConfiguration(),
                                                completionHandler: nil)
         } else if let cli = OllamaInstallLocator.cliURL() {
+            // H-20: `/usr/local/bin` is admin-writable without root on many
+            // Macs, so a planted `ollama` binary there must never run just
+            // because a file with the right name exists at a candidate path.
+            // Refuse anything that isn't Apple-signed or Developer-ID-signed.
+            if let refusal = Self.launchRefusalReason(for: cli) {
+                message = refusal
+                RollingLog.shared.log(
+                    "refused to launch untrusted Ollama binary at \(cli.path) (H-20)",
+                    level: .error)
+                await refresh()
+                return
+            }
             let process = Process()
             process.executableURL = cli
             process.arguments = ["serve"]
@@ -91,6 +103,23 @@ final class OllamaEngine: ObservableObject {
         if await !control.reachable() {
             message = "Ollama didn\u{2019}t come up. Try starting Ollama.app manually."
         }
+    }
+
+    /// Actionable refusal message for launching `cli`, or `nil` if it's safe
+    /// to spawn (H-20). Split out from `startOllama()`'s control flow, and
+    /// the trust check itself is injected, so a test can assert the refusal
+    /// path — including the exact message text — without touching the real
+    /// Security framework or spawning a process. `nonisolated` (unlike the
+    /// rest of this `@MainActor` class): it touches no actor-isolated state,
+    /// so a plain synchronous unit test can call it directly.
+    nonisolated static func launchRefusalReason(
+        for cli: URL,
+        isTrusted: (URL) -> Bool = BinarySignature.isTrusted
+    ) -> String? {
+        guard !isTrusted(cli) else { return nil }
+        return "The Ollama binary at \(cli.path) failed signature verification " +
+            "and won\u{2019}t be started. Reinstall Ollama from ollama.com or via " +
+            "Homebrew (`brew install ollama`), then try again."
     }
 
     /// Streams an `/api/pull` for a user-initiated download, publishing
