@@ -54,6 +54,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         let draftScheduler = DraftScheduler()
         draftScheduler.start()
         self.draftScheduler = draftScheduler
+
+        // Phase 4 macOS Services menu (docs/draft-modus-plan.md): "Insert"/
+        // "Regenerate" draft, registered via Packaging/Info.plist's
+        // NSServices array. See DraftServiceProvider.swift.
+        NSApp.servicesProvider = DraftServiceProvider()
+        NSUpdateDynamicServices()
     }
 
     /// Installs a minimal main menu carrying the standard Edit commands.
@@ -194,6 +200,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             window.center()
             settingsWindow = window
         }
+        // Reused window: SwiftUI's .onAppear does not reliably re-fire on
+        // reorder-front, so refresh on every open the same way
+        // openDraftsWindow already does -- otherwise Draft-Modus's status
+        // line and learned-style section can show stale state after the
+        // first open.
+        DraftEngine.shared.refreshCounts()
         settingsWindow?.makeKeyAndOrderFront(nil)
         NSApp.activate(ignoringOtherApps: true)
     }

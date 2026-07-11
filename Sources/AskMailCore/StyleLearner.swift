@@ -139,6 +139,12 @@ public enum StyleLearner {
             return
         }
 
+        // Captured before the (multi-second-to-minutes) LLM merge calls
+        // below, so a concurrent Settings "Reset learned style" mid-flight
+        // can be detected and this call's now-stale writes discarded below,
+        // instead of silently resurrecting data the user just cleared.
+        let epochAtStart = try draftStore.styleProfilesEpoch()
+
         var scopes = [StyleScope.global, StyleScope.domain(draft.sender)]
         if let addressScope = StyleScope.address(draft.sender) { scopes.append(addressScope) }
 
@@ -162,6 +168,16 @@ public enum StyleLearner {
         // throwing) leaves the draft eligible for retry on a later pass
         // instead of silently losing the sample.
         guard !updates.isEmpty else { return }
+
+        guard try draftStore.styleProfilesEpoch() == epochAtStart else {
+            // A reset happened while this merge was in flight: `updates`
+            // was folded from profile text that's since been deliberately
+            // cleared. Discard rather than writing it back -- the draft
+            // stays unmarked, so it's simply re-examined on a later pass.
+            RollingLog.shared.log("style learning discarded (profiles reset mid-merge) for draft pk=\(draft.pk)",
+                                  level: .info)
+            return
+        }
 
         for update in updates {
             try draftStore.upsertStyleProfile(scope: update.scope, profileText: update.profileText,

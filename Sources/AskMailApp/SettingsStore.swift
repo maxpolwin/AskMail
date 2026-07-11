@@ -93,6 +93,13 @@ final class SettingsStore: ObservableObject {
     @Published var draftAllowOnBattery: Bool {
         didSet { defaults.set(draftAllowOnBattery, forKey: "draftAllowOnBattery") }
     }
+    /// Senders/domains Draft-Modus should never draft for (Phase 6,
+    /// docs/draft-modus-plan.md) -- checked by `SenderExclusion.isExcluded`
+    /// in `DraftJobProcessor.classifyPendingJobs`. Each entry is a bare
+    /// email address or domain; empty by default.
+    @Published var draftExcludedSenders: [String] {
+        didSet { defaults.set(draftExcludedSenders, forKey: "draftExcludedSenders") }
+    }
 
     private init() {
         provider = ProviderChoice(rawValue: defaults.string(forKey: "provider") ?? "") ?? .ollamaLocal
@@ -131,6 +138,7 @@ final class SettingsStore: ObservableObject {
         highContrastEnabled = defaults.bool(forKey: "highContrastEnabled")
         draftModeEnabled = defaults.bool(forKey: "draftModeEnabled")
         draftAllowOnBattery = defaults.bool(forKey: "draftAllowOnBattery")
+        draftExcludedSenders = defaults.stringArray(forKey: "draftExcludedSenders") ?? []
 
         // Migrate the pre-picker path setting: an account directory's last path
         // component is its id. (didSet doesn't fire during init, so persist here.)

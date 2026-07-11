@@ -47,6 +47,34 @@ private final class FailAfterNChatProvider: ChatProvider, @unchecked Sendable {
     }
 }
 
+/// Simulates a concurrent Settings "Reset learned style" happening *during*
+/// `learn`'s LLM merge calls: triggers the reset (bumping
+/// `styleProfilesEpoch`) on the first `stream` call, before yielding any
+/// tokens, then completes normally -- proving the epoch check in `learn`
+/// discards the resulting stale write instead of persisting it.
+private final class ResetMidMergeChatProvider: ChatProvider, @unchecked Sendable {
+    let name = "reset-mid-merge-stub"
+    private let draftStore: DraftStore
+    private let lock = NSLock()
+    private var triggered = false
+
+    init(draftStore: DraftStore) { self.draftStore = draftStore }
+
+    func stream(_ request: ChatRequest) -> AsyncThrowingStream<String, Error> {
+        lock.lock()
+        let shouldTrigger = !triggered
+        triggered = true
+        lock.unlock()
+        if shouldTrigger {
+            try? draftStore.deleteStyleProfiles()
+        }
+        return AsyncThrowingStream { continuation in
+            continuation.yield("merged profile text")
+            continuation.finish()
+        }
+    }
+}
+
 final class StyleLearnerTests: XCTestCase {
 
     // MARK: StyleScope
@@ -361,6 +389,39 @@ final class StyleLearnerTests: XCTestCase {
         try draftStore.upsertStyleProfile(scope: "address:alice@acme.com", profileText: "", sampleCount: 1, updatedAt: 1)
         try draftStore.upsertStyleProfile(scope: "global", profileText: "global style", sampleCount: 1, updatedAt: 1)
         XCTAssertEqual(try StyleLearner.guidance(forRecipient: "alice@acme.com", draftStore: draftStore), "global style")
+    }
+
+    // MARK: learnIfDue — concurrent reset mid-merge
+
+    /// Regression: a Settings "Reset learned style" that lands *during*
+    /// `learn`'s multi-call LLM merge must not have its effect silently
+    /// undone by that in-flight call writing back profile text folded from
+    /// the now-deleted (pre-reset) profile.
+    func testLearnDiscardsItsWriteWhenProfilesAreResetMidMerge() async throws {
+        let draftStore = try DraftStore.inMemory()
+        let askStore = try SQLiteStore.inMemory()
+        let threadID = try ingest(store: askStore, messageID: "root@x", sender: "Alice <alice@acme.com>",
+                                  bodyText: "Can we push the deadline?", dateUnix: 1000)
+        try ingest(store: askStore, messageID: "reply@x", sender: "Max <max@example.com>",
+                  bodyText: "Sure, Friday works.", inReplyTo: "root@x", dateUnix: 1000 + threeDays + 100)
+
+        let draftGeneratedAt: Int64 = 1000 + 10
+        let draftPk = try draftStore.insertDraft(threadID: threadID, latestMessageID: "root@x",
+                                                 sender: "Alice <alice@acme.com>", subject: "Re: deadline",
+                                                 draftText: "Happy to push it to Friday.",
+                                                 generatedAt: draftGeneratedAt, status: .ready)
+
+        let provider = ResetMidMergeChatProvider(draftStore: draftStore)
+        let now = Date(timeIntervalSince1970: Double(draftGeneratedAt + threeDays + 200))
+        try await StyleLearner.learnIfDue(draftStore: draftStore, askStore: askStore, chatProvider: provider,
+                                          accountEmail: "max@example.com", now: now)
+
+        XCTAssertNil(try draftStore.styleProfile(scope: "global"),
+                     "the write computed before the reset must be discarded, not resurrect the cleared profile")
+        let stillPending = try draftStore.draftsAwaitingStyleLearning(
+            olderThanGeneratedAt: now.timeIntervalSince1970Int64, limit: 10)
+        XCTAssertTrue(stillPending.contains { $0.pk == draftPk },
+                     "the draft must stay unmarked so the sample isn't lost -- it's re-examined on a later pass")
     }
 }
 

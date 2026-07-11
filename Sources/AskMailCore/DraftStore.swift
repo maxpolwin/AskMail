@@ -329,6 +329,21 @@ public final class DraftStore {
         return sqlite3_changes(db) > 0
     }
 
+    /// Deletes every `ready` draft for `threadID` -- used by "Regenerate"
+    /// (Phase 4, docs/draft-modus-plan.md) so only the freshly generated
+    /// draft remains `ready` for that thread, instead of accumulating stale
+    /// duplicates. Anticipated since Phase 1: `latestDraft`'s own doc
+    /// comment already noted "a thread may have several rows if the user
+    /// regenerated — a later phase's concern."
+    @discardableResult
+    public func deleteReadyDrafts(threadID: String) throws -> Int {
+        lock.lock(); defer { lock.unlock() }
+        try run("DELETE FROM drafts WHERE thread_id = ? AND status = 'ready'") { statement in
+            bind(statement, 1, threadID)
+        }
+        return Int(sqlite3_changes(db))
+    }
+
     // MARK: Style learning (Phase 3, docs/style-learning-contract.md)
 
     /// Draft rows `StyleLearner` hasn't yet learned from (`style_learned_at
@@ -387,6 +402,66 @@ public final class DraftStore {
                                   updatedAt: sqlite3_column_int64(statement, 3))
         }
         return result
+    }
+
+    /// Every learned style profile, most-recently-updated first — Settings'
+    /// transparency surfacing (Phase 6, docs/draft-modus-plan.md): "what
+    /// shaped this draft's tone", mirroring the same principle Q&A citations
+    /// already give the user.
+    public func allStyleProfiles() throws -> [StyleProfile] {
+        lock.lock(); defer { lock.unlock() }
+        var results: [StyleProfile] = []
+        try query("""
+        SELECT scope, profile_text, sample_count, updated_at FROM style_profiles ORDER BY updated_at DESC
+        """) { _ in
+        } row: { statement in
+            results.append(StyleProfile(scope: column(statement, 0), profileText: column(statement, 1),
+                                        sampleCount: Int(sqlite3_column_int64(statement, 2)),
+                                        updatedAt: sqlite3_column_int64(statement, 3)))
+        }
+        return results
+    }
+
+    private static let styleProfilesEpochKey = "style_profiles_epoch"
+
+    /// Monotonic counter bumped by every `deleteStyleProfiles` call. Lets a
+    /// caller with a long-running read-modify-write against `style_profiles`
+    /// (`StyleLearner.learn`'s multi-second-to-minutes LLM merge calls)
+    /// detect that a reset happened *during* that window and discard its
+    /// now-stale write, instead of silently resurrecting data the user just
+    /// cleared.
+    public func styleProfilesEpoch() throws -> Int64 {
+        lock.lock(); defer { lock.unlock() }
+        return Int64(try rawMeta(Self.styleProfilesEpochKey) ?? "0") ?? 0
+    }
+
+    /// Deletes learned style profiles -- Settings' "Reset learned style"
+    /// action (Phase 6), mirroring `SQLiteStore.deleteAll()`/FR-8's "delete
+    /// & rebuild" pattern but scoped to just `style_profiles`, so a user
+    /// unhappy with the learned tone isn't forced into rebuilding the whole
+    /// drafts database. `scope` nil deletes every row; otherwise only that
+    /// one scope. Does not touch `drafts.style_learned_at` -- already-
+    /// examined draft rows stay examined (their evidence was already
+    /// folded in and is now gone), so the profile stays empty until *new*
+    /// Sent replies are learned from, matching the Phase 6 DoD exactly.
+    /// Always bumps `styleProfilesEpoch`, even for a scoped delete or a
+    /// delete that matched zero rows -- any reset must be able to
+    /// invalidate an in-flight learner write regardless of which scope(s)
+    /// that write targets.
+    @discardableResult
+    public func deleteStyleProfiles(scope: String? = nil) throws -> Int {
+        lock.lock(); defer { lock.unlock() }
+        if let scope {
+            try run("DELETE FROM style_profiles WHERE scope = ?") { statement in
+                bind(statement, 1, scope)
+            }
+        } else {
+            try execute("DELETE FROM style_profiles")
+        }
+        let changed = Int(sqlite3_changes(db))
+        let newEpoch = (Int64(try rawMeta(Self.styleProfilesEpochKey) ?? "0") ?? 0) + 1
+        try rawSetMeta(Self.styleProfilesEpochKey, value: String(newEpoch))
+        return changed
     }
 
     /// Replaces a scope's profile wholesale — `StyleLearner` always computes
@@ -561,6 +636,18 @@ public final class DraftStore {
 
     public func meta(_ key: String) throws -> String? {
         lock.lock(); defer { lock.unlock() }
+        return try rawMeta(key)
+    }
+
+    public func setMeta(_ key: String, value: String) throws {
+        lock.lock(); defer { lock.unlock() }
+        try rawSetMeta(key, value: value)
+    }
+
+    /// Lock-free versions of the two above, for callers that already hold
+    /// `lock` (`NSLock` isn't reentrant, so `deleteStyleProfiles` needs
+    /// these rather than calling back into `meta`/`setMeta`).
+    private func rawMeta(_ key: String) throws -> String? {
         var value: String?
         try query("SELECT value FROM meta WHERE key = ?") { statement in
             bind(statement, 1, key)
@@ -570,8 +657,7 @@ public final class DraftStore {
         return value
     }
 
-    public func setMeta(_ key: String, value: String) throws {
-        lock.lock(); defer { lock.unlock() }
+    private func rawSetMeta(_ key: String, value: String) throws {
         try run("INSERT INTO meta(key, value) VALUES (?, ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value") { statement in
             bind(statement, 1, key)
             bind(statement, 2, value)

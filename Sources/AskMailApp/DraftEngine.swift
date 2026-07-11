@@ -31,6 +31,14 @@ final class DraftEngine: ObservableObject {
     /// Newsletter/bulk-mail + auto-generated jobs combined (DraftStore.
     /// skippedJobCount's doc comment explains why they're one figure here).
     @Published private(set) var skippedCount: Int = 0
+    /// Every learned style profile (Phase 6 Settings surfacing). Published
+    /// here rather than held as `SettingsView`'s own `@State` so it reflects
+    /// reality on every `refreshCounts()` call -- including one triggered
+    /// from outside the view (`AppDelegate.openSettings`) -- not just the
+    /// view's own `.onAppear`, which SwiftUI does not reliably re-fire on a
+    /// reused `NSWindow` (see `openDraftsWindow`'s identical `refreshCounts()`
+    /// workaround for the same trap).
+    @Published private(set) var styleProfiles: [StyleProfile] = []
     private var isRunning = false
 
     private let settings = SettingsStore.shared
@@ -88,6 +96,7 @@ final class DraftEngine: ObservableObject {
         let localChatModel = settings.localChatModel
         let accountStorageKey = settings.accountStorageKey
         let accountEmail = settings.accountEmail
+        let excludedSenders = settings.draftExcludedSenders
         let concurrency = Self.concurrency(for: trigger, isOnACPower: PowerState.isOnACPower,
                                            allowOnBattery: settings.draftAllowOnBattery)
 
@@ -131,11 +140,12 @@ final class DraftEngine: ObservableObject {
                 let localLLM = OllamaClient(host: Defaults.ollamaLocalHost, model: localChatModel)
                 try await DraftJobProcessor.classifyPendingJobs(
                     draftStore: draftStore, askStore: askStore, parser: parser, fileIndex: fileIndex,
-                    llmFallback: localLLM, accountEmail: accountEmail)
+                    llmFallback: localLLM, accountEmail: accountEmail, excludedSenders: excludedSenders)
 
                 await DraftJobProcessor.draftEligibleJobs(
                     draftStore: draftStore, askStore: askStore, chatProvider: localLLM,
-                    embedder: OllamaEmbedder(model: embeddingModel), concurrency: concurrency)
+                    embedder: OllamaEmbedder(model: embeddingModel), concurrency: concurrency,
+                    accountEmail: accountEmail)
 
                 // Phase 3: local-only, same as everything else in this tick
                 // (H-11 has no per-instance consent moment for an unattended
@@ -175,6 +185,7 @@ final class DraftEngine: ObservableObject {
             failedCount = 0
             readyCount = 0
             skippedCount = 0
+            styleProfiles = []
             return
         }
         let counts = (try? draftStore.pendingAndFailedCounts()) ?? (pending: 0, failed: 0)
@@ -182,6 +193,7 @@ final class DraftEngine: ObservableObject {
         failedCount = counts.failed
         readyCount = (try? draftStore.readyDraftCount()) ?? 0
         skippedCount = (try? draftStore.skippedJobCount()) ?? 0
+        styleProfiles = (try? draftStore.allStyleProfiles()) ?? []
     }
 
     /// Lazily opens and caches the one `DraftStore` connection `refreshCounts`
@@ -223,6 +235,20 @@ final class DraftEngine: ObservableObject {
             RollingLog.shared.log("draft notification bookkeeping failed: \(error)", level: .info)
         }
     }
+
+    /// Advances the "newly ready" notification cursor to at least `pk`,
+    /// without sending a notification. For a caller (Phase 4's Services
+    /// menu "Regenerate") that already sends its *own* notification for a
+    /// draft it just inserted -- without this, the next scheduled tick's
+    /// `notifyNewlyReadyDrafts` would see that same row as "newly ready"
+    /// (its pk is above the old cursor) and send a second, duplicate
+    /// notification for it. `nonisolated`: called from `DraftServiceProvider`'s
+    /// detached task, same reasoning as `notifyNewlyReadyDrafts`.
+    nonisolated static func skipNotifying(forDraftPk pk: Int64, draftStore: DraftStore) {
+        let current = (try? draftStore.meta(notifiedCursorKey)).flatMap { $0 }.flatMap(Int64.init) ?? 0
+        guard pk > current else { return }
+        try? draftStore.setMeta(notifiedCursorKey, value: String(pk))
+    }
 }
 
 /// Best-effort local notifications for newly-ready drafts. Guarded on
@@ -236,6 +262,39 @@ final class DraftEngine: ObservableObject {
 enum DraftNotifier {
     static func notify(newlyReadyDrafts: [DraftRecord]) async {
         guard !newlyReadyDrafts.isEmpty else { return }
+        await withAuthorization { center in
+            for draft in newlyReadyDrafts {
+                let content = UNMutableNotificationContent()
+                content.title = "AskMail"
+                content.body = "Draft ready: \(draft.subject.isEmpty ? "(no subject)" : draft.subject)"
+                let request = UNNotificationRequest(
+                    identifier: "draft-ready-\(draft.pk)", content: content, trigger: nil)
+                try await center.add(request)
+            }
+        }
+    }
+
+    /// "Regenerate" (Phase 4 Services menu) completion. A distinct
+    /// identifier namespace ("draft-regenerated-") from `newlyReadyDrafts`'
+    /// ("draft-ready-\(pk)") so regenerating an existing thread's draft
+    /// never collides with, or gets silently deduped against, that thread's
+    /// original "ready" notification.
+    static func notify(regeneratedDraftSubject subject: String) async {
+        await withAuthorization { center in
+            let content = UNMutableNotificationContent()
+            content.title = "AskMail"
+            content.body = "Draft regenerated: \(subject.isEmpty ? "(no subject)" : subject)"
+            let request = UNNotificationRequest(
+                identifier: "draft-regenerated-\(UUID().uuidString)", content: content, trigger: nil)
+            try await center.add(request)
+        }
+    }
+
+    /// Shared guard + lazy-authorization dance both notify variants use.
+    /// Every failure (permission denied, XPC hiccup, ...) is logged at
+    /// `.info` and swallowed -- a missed notification must never block or
+    /// fail the drafting/regeneration work itself.
+    private static func withAuthorization(_ body: (UNUserNotificationCenter) async throws -> Void) async {
         guard Bundle.main.bundleIdentifier != nil else {
             RollingLog.shared.log("draft notification skipped: no app bundle (swift run)", level: .info)
             return
@@ -253,15 +312,7 @@ enum DraftNotifier {
             let current = await center.notificationSettings()
             guard current.authorizationStatus == .authorized
                     || current.authorizationStatus == .provisional else { return }
-
-            for draft in newlyReadyDrafts {
-                let content = UNMutableNotificationContent()
-                content.title = "AskMail"
-                content.body = "Draft ready: \(draft.subject.isEmpty ? "(no subject)" : draft.subject)"
-                let request = UNNotificationRequest(
-                    identifier: "draft-ready-\(draft.pk)", content: content, trigger: nil)
-                try await center.add(request)
-            }
+            try await body(center)
         } catch {
             RollingLog.shared.log("draft notification failed: \(error)", level: .info)
         }

@@ -80,4 +80,107 @@ final class DraftStoreStyleTests: XCTestCase {
         XCTAssertEqual(try store.styleProfile(scope: "domain:acme")?.profileText, "domain text")
         XCTAssertEqual(try store.styleProfile(scope: "address:a@acme.com")?.profileText, "address text")
     }
+
+    // MARK: allStyleProfiles / deleteStyleProfiles (Phase 6 Settings surfacing)
+
+    func testAllStyleProfilesReturnsEveryScopeMostRecentlyUpdatedFirst() throws {
+        let store = try DraftStore.inMemory()
+        try store.upsertStyleProfile(scope: "global", profileText: "g", sampleCount: 3, updatedAt: 100)
+        try store.upsertStyleProfile(scope: "domain:acme", profileText: "d", sampleCount: 1, updatedAt: 300)
+        try store.upsertStyleProfile(scope: "address:a@acme.com", profileText: "a", sampleCount: 2, updatedAt: 200)
+
+        let all = try store.allStyleProfiles()
+        XCTAssertEqual(all.map(\.scope), ["domain:acme", "address:a@acme.com", "global"])
+    }
+
+    func testAllStyleProfilesIsEmptyWhenNothingLearnedYet() throws {
+        let store = try DraftStore.inMemory()
+        XCTAssertTrue(try store.allStyleProfiles().isEmpty)
+    }
+
+    func testDeleteStyleProfilesWithNilScopeDeletesEverything() throws {
+        let store = try DraftStore.inMemory()
+        try store.upsertStyleProfile(scope: "global", profileText: "g", sampleCount: 1, updatedAt: 1)
+        try store.upsertStyleProfile(scope: "domain:acme", profileText: "d", sampleCount: 1, updatedAt: 1)
+
+        let deleted = try store.deleteStyleProfiles()
+        XCTAssertEqual(deleted, 2)
+        XCTAssertTrue(try store.allStyleProfiles().isEmpty)
+    }
+
+    func testDeleteStyleProfilesWithAScopeOnlyDeletesThatOne() throws {
+        let store = try DraftStore.inMemory()
+        try store.upsertStyleProfile(scope: "global", profileText: "g", sampleCount: 1, updatedAt: 1)
+        try store.upsertStyleProfile(scope: "domain:acme", profileText: "d", sampleCount: 1, updatedAt: 1)
+
+        let deleted = try store.deleteStyleProfiles(scope: "domain:acme")
+        XCTAssertEqual(deleted, 1)
+        XCTAssertNotNil(try store.styleProfile(scope: "global"))
+        XCTAssertNil(try store.styleProfile(scope: "domain:acme"))
+    }
+
+    /// Resetting must not resurrect already-`markStyleLearned` draft rows
+    /// for re-examination -- their evidence is gone, so guidance stays nil
+    /// until genuinely *new* Sent replies are learned from (Phase 6 DoD).
+    func testDeleteStyleProfilesDoesNotResetAlreadyLearnedDraftMarkers() throws {
+        let store = try DraftStore.inMemory()
+        let pk = try store.insertDraft(threadID: "t1", latestMessageID: "m1", sender: "a@x", subject: "s",
+                                       draftText: "d", generatedAt: 1, status: .ready)
+        try store.markStyleLearned(pk: pk, at: 500)
+        try store.upsertStyleProfile(scope: "global", profileText: "g", sampleCount: 1, updatedAt: 500)
+
+        try store.deleteStyleProfiles()
+
+        XCTAssertNil(try store.styleProfile(scope: "global"))
+        XCTAssertTrue(try store.draftsAwaitingStyleLearning(olderThanGeneratedAt: 1000, limit: 10).isEmpty,
+                      "an already-learned draft must not become re-examinable just because the profile was reset")
+    }
+
+    // MARK: styleProfilesEpoch
+
+    func testStyleProfilesEpochStartsAtZero() throws {
+        let store = try DraftStore.inMemory()
+        XCTAssertEqual(try store.styleProfilesEpoch(), 0)
+    }
+
+    func testDeleteStyleProfilesBumpsTheEpoch() throws {
+        let store = try DraftStore.inMemory()
+        try store.upsertStyleProfile(scope: "global", profileText: "g", sampleCount: 1, updatedAt: 1)
+
+        try store.deleteStyleProfiles()
+        XCTAssertEqual(try store.styleProfilesEpoch(), 1)
+
+        try store.deleteStyleProfiles()
+        XCTAssertEqual(try store.styleProfilesEpoch(), 2, "every reset must bump the epoch, even an empty one")
+    }
+
+    func testDeleteStyleProfilesBumpsTheEpochEvenForAScopedDelete() throws {
+        let store = try DraftStore.inMemory()
+        try store.deleteStyleProfiles(scope: "domain:acme")
+        XCTAssertEqual(try store.styleProfilesEpoch(), 1,
+                       "any reset must be able to invalidate an in-flight learner write, regardless of scope")
+    }
+
+    // MARK: deleteReadyDrafts (Phase 4 Regenerate: replace, don't duplicate)
+
+    func testDeleteReadyDraftsRemovesOnlyReadyRowsForThatThread() throws {
+        let store = try DraftStore.inMemory()
+        let readyPk = try store.insertDraft(threadID: "t1", latestMessageID: "m1", sender: "a@x", subject: "s",
+                                            draftText: "d1", generatedAt: 1, status: .ready)
+        _ = try store.insertDraft(threadID: "t1", latestMessageID: "m2", sender: "a@x", subject: "s",
+                                  draftText: "d2", generatedAt: 2, status: .pending)
+        let otherThreadPk = try store.insertDraft(threadID: "t2", latestMessageID: "m3", sender: "a@x", subject: "s",
+                                                   draftText: "d3", generatedAt: 3, status: .ready)
+
+        let deleted = try store.deleteReadyDrafts(threadID: "t1")
+        XCTAssertEqual(deleted, 1)
+        XCTAssertNil(try store.latestDraft(threadID: "t1").flatMap { $0.pk == readyPk ? $0 : nil })
+        XCTAssertNotNil(try store.latestDraft(threadID: "t2"))
+        XCTAssertEqual(try store.latestDraft(threadID: "t2")?.pk, otherThreadPk)
+    }
+
+    func testDeleteReadyDraftsIsANoOpWhenThereIsNothingToDelete() throws {
+        let store = try DraftStore.inMemory()
+        XCTAssertEqual(try store.deleteReadyDrafts(threadID: "nonexistent"), 0)
+    }
 }

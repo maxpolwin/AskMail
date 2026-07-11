@@ -43,6 +43,9 @@ check passes. Verification commands are collected in the
 | H-18 Lock down the mailbox-mirror DB | ✅ Implemented (predates this pass). `FileHardening.lockDown` on both `askmail.db` and `drafts.db` at every open: 0600/0700, Time Machine + Spotlight excluded. An existing DB created by an older build self-heals on next open. |
 | H-20 Verify the Ollama binary | ✅ Implemented. [BinarySignature.swift](../Sources/AskMailCore/BinarySignature.swift) (`anchor apple` or Developer ID) gates `OllamaEngine.startOllama()`; refusal is actionable and unit-tested. |
 | H-23 Default log level | ✅ Implemented. `SettingsStore`/`RollingLog` both default to `.info`; the one `.info`-level line with user text is now capped at 200 chars. |
+| H-24 Draft-Modus DB lockdown | ✅ Implemented. `drafts.db` gets the identical `FileHardening.lockDown` treatment as `askmail.db` at every open — see [Draft-Modus hardening posture](#draft-modus-dm-hardening-posture). |
+| H-25 Draft-Modus stays local-only on every path | ✅ Implemented. Scheduled ticks, on-demand Services "Regenerate", and style learning all construct their `ChatProvider`/`EmbeddingProvider` from `Defaults.ollamaLocalHost` directly — never the user's configured (possibly cloud) Q&A provider. |
+| H-26 Services-menu surface adds no new grant | ✅ Implemented. Phase 4's `DraftServiceProvider` is a standard, unprivileged `NSServices` provider reading/writing only local SQLite state; no FDA/Automation/Accessibility prompt at any point. |
 | H-12, H-17, H-19, H-21, H-22 | Open. TLS pinning (H-12), code-signature Keychain ACL (H-17), FDA onboarding copy (H-19), CI-enforced scans (H-21), provenance doc (H-22). |
 
 **H-6 in detail:** `Sources/AskMailParserXPC` is a new sandboxed executable
@@ -307,6 +310,33 @@ default in-memory log holds mail excerpts and answers.
 
 ---
 
+## Draft-Modus (DM) hardening posture
+
+Draft-Modus (`docs/draft-modus-plan.md`) is opt-in and off by default
+(`SettingsStore.draftModeEnabled`). These items are its own hardening
+surface, called out separately from the P0–P2 items above since they're
+feature-specific safety properties rather than app-wide ones — same rigor,
+same one-unambiguous-DoD-per-item style.
+
+| ID | Item | DoD |
+|---|---|---|
+| **H-24** ✅ | `drafts.db` gets the same lockdown as `askmail.db` — no weaker just because it's the newer, opt-in database. | `FileHardening.lockDown` is called at every `DraftStore.init` ([DraftStore.swift:127](../Sources/AskMailCore/DraftStore.swift)), identically to `SQLiteStore`: `ls -le` on `drafts.db` (+ `-wal`/`-shm`) shows `0600`, the containing directory `0700`, Time Machine + Spotlight excluded. |
+| **H-25** ✅ | Every Draft-Modus generation path is local-only, regardless of the user's configured Q&A provider (H-11's egress-transparency posture would otherwise be silently bypassed for unattended background work). | Grep confirms: `DraftEngine.runTick` ([DraftEngine.swift](../Sources/AskMailApp/DraftEngine.swift)) and `DraftServiceProvider.regenerateDraft` ([DraftServiceProvider.swift](../Sources/AskMailApp/DraftServiceProvider.swift)) both construct `OllamaClient(host: Defaults.ollamaLocalHost, …)` directly — neither reads `SettingsStore.provider`. `StyleLearner`'s merge call takes the same locally-constructed provider as an explicit parameter, never resolves its own. |
+| **H-26** ✅ | Phase 4's macOS Services-menu integration (`DraftServiceProvider`) adds no new OS permission and touches no new attack surface — a standard, unprivileged `NSServices` provider, reading/writing only `drafts.db`/`askmail.db` (already-granted FDA-derived local state) via the pasteboard AppKit already hands it. | `Packaging/AskMail.entitlements` is unchanged by Phase 4 (still the near-empty H-2 file); registration produces **no** FDA/Automation/Accessibility prompt at any point — confirmed live against Mail.app with a diagnostic provider using the identical `NSServices` mechanism (see the spike detail below). The real `insertDraft`/`regenerateDraft` methods are unit-tested (`DraftServiceMatcherTests`, `DraftJobProcessorTests`) but their live end-to-end behavior against a real Mail.app draft is a pending manual verification step — see the Draft-Modus verification playbook below. |
+| **H-27** ⛔ | Phase 5's global-hotkey Mail Automation grant (AskMail's first-ever Automation grant) — scope and Accessibility decision, once it ships. | Not yet applicable: Phase 5 remains a stub in `docs/draft-modus-plan.md` pending its own live-Mac spikes (`sdef`, and whether insertion requires an Accessibility grant). This item gets a real DoD when that phase lands; the existing regression guard (`HotkeyManager.swift:40` — "no `CGEventTap`, no Accessibility grant") must stay true regardless of how Phase 5 resolves. |
+
+**Identification mechanism (H-26 detail):** a live-Mac spike (`docs/draft-modus-plan.md`
+Phase 4) established that a Mail.app Services invocation hands the provider
+only the user's current selection (text/RTF) — never a message id or any
+AppleScript-level identifier. `DraftServiceMatcher` ([DraftServiceMatcher.swift](../Sources/AskMailCore/DraftServiceMatcher.swift))
+extracts the correspondent's address from Mail's standard quoted-reply
+header and matches it against `drafts.db`'s `ready` rows, disambiguating
+same-sender/multiple-thread cases via body overlap against `askmail.db`.
+No data is sent anywhere; both stores are already-local, already-hardened
+(H-18/H-24) SQLite files.
+
+---
+
 ## Suggested implementation order
 
 1. ~~**H-1 → H-5** (P0 signing/runtime)~~ ✅ Done — see Implementation status.
@@ -355,7 +385,40 @@ xattr -p com.apple.metadata:com_apple_backup_excludeItem "$HOME/Library/Applicat
 
 # Log data-minimization (H-23) — default level is .info; an .info export holds
 # no prompt.user / llm answer / chunk-text lines.
+
+# Draft-Modus data-at-rest (H-24)
+ls -le "$HOME/Library/Application Support/AskMail/drafts.db"   # expect 0600
+
+# Draft-Modus local-only (H-25)
+grep -n "OllamaClient(host: Defaults.ollamaLocalHost" \
+  Sources/AskMailApp/DraftEngine.swift Sources/AskMailApp/DraftServiceProvider.swift
+# both must match; neither file should read settings.provider before constructing a chat provider
+
+# Draft-Modus Services menu (H-26) — with a drafted, ready thread open in Mail:
+# select the quoted reply text, Mail ▸ Services shows "AskMail: Insert Draft" /
+# "AskMail: Regenerate Draft"; invoking either produces no FDA/Automation/
+# Accessibility prompt (System Settings ▸ Privacy & Security shows no new grant).
 ```
+
+**Draft-Modus full verification playbook** (Phase 6 DoD, exercising every
+surface together, same spirit as the playbook above):
+1. Settings ▸ Draft-Modus: toggle on, confirm the status line ("Queued ·
+   Drafted · Skipped[, Failed]") updates after a tick with no restart needed.
+2. Add a sender/domain to "Never draft for", confirm a subsequent message
+   from that sender lands in `newsletterSkipped` (Settings' "Skipped" count
+   increments; regression test: `testClassifyPendingJobsSkipsExcludedSenderWithoutInvokingLLMFallback`).
+3. Wait for a real draft; open it from the menu bar's "Drafts" window
+   (Copy / Open thread in Mail / Discard all still read-only, per
+   `docs/draft-contract.md`).
+4. In Mail, open the same thread's reply, select the quoted text, invoke
+   "AskMail: Insert Draft" — the selection is replaced with the exact
+   `draft_text`; invoke "AskMail: Regenerate Draft" — the stored draft is
+   replaced and a subsequent "Insert" reflects the new text.
+5. Settings ▸ "Draft-Modus: learned style": after enough real Sent replies
+   have been learned from, confirm per-scope "learned from N replies"
+   rows appear; "Reset learned style…" empties them (regression test:
+   `testDeleteStyleProfilesWithNilScopeDeletesEverything`) and a subsequent
+   draft carries no style guidance until new samples accumulate.
 
 External-tool equivalents (Objective-See): **What's Your Sign?** for the
 signature/entitlements, **KnockKnock** to confirm the login item is the only

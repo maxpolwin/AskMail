@@ -24,6 +24,10 @@ struct SettingsView: View {
     @State private var accessStatus: MailAccessStatus = .ok
     @State private var showSystemPromptEditor = false
     @State private var showEmbeddingSwapConfirmation = false
+    /// New sender/domain entry field for the Draft-Modus exclusion list
+    /// editor (Phase 6, docs/draft-modus-plan.md).
+    @State private var newExcludedSender = ""
+    @State private var showResetStyleConfirmation = false
     /// The in-flight embedding-model change awaiting rebuild consent; `from`
     /// restores the picker on cancel.
     @State private var embeddingSwap: (from: String, to: String, messages: Int)?
@@ -187,10 +191,44 @@ struct SettingsView: View {
                     Text(draftStatusLine)
                         .font(.callout)
                         .foregroundStyle(.secondary)
+
+                    DisclosureGroup("Never draft for (\(settings.draftExcludedSenders.count))") {
+                        senderExclusionEditor
+                    }
                 }
                 Text("Quietly drafts replies to ordinary inbox mail in the background, using only the local model \u{2014} never a cloud provider, regardless of the Q&A provider chosen above. A draft is never sent, inserted, or written into Apple Mail automatically: open \u{201C}Drafts\u{201D} from the menu bar to review, copy, or discard one yourself.")
                     .font(.caption)
                     .foregroundStyle(.secondary)
+            }
+
+            if settings.draftModeEnabled {
+                Section("Draft-Modus: learned style") {
+                    if draftEngine.styleProfiles.isEmpty {
+                        Text("AskMail hasn\u{2019}t learned a writing style yet. It compares each auto-drafted reply against what you actually send and gradually adapts \u{2014} check back after a few real replies.")
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                    } else {
+                        ForEach(draftEngine.styleProfiles, id: \.scope) { profile in
+                            HStack(alignment: .firstTextBaseline) {
+                                Text(Self.styleScopeLabel(profile.scope))
+                                    .font(.caption)
+                                Spacer()
+                                Text("learned from \(profile.sampleCount) repl\(profile.sampleCount == 1 ? "y" : "ies") \u{00B7} "
+                                     + Date(timeIntervalSince1970: TimeInterval(profile.updatedAt))
+                                        .formatted(date: .abbreviated, time: .omitted))
+                                    .font(.caption)
+                                    .foregroundStyle(.secondary)
+                            }
+                        }
+                    }
+                    Button("Reset learned style\u{2026}", role: .destructive) {
+                        showResetStyleConfirmation = true
+                    }
+                    .disabled(draftEngine.styleProfiles.isEmpty)
+                    Text("Drafts are grounded in your real writing style once AskMail has learned from a few of your replies \u{2014} the most specific correspondent match wins. Resetting clears everything learned so far; new drafts fall back to a neutral tone until new replies teach it again.")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                }
             }
 
             Section("Models") {
@@ -445,6 +483,13 @@ struct SettingsView: View {
             Button("Delete & rebuild", role: .destructive) { deleteAndRebuild() }
             Button("Cancel", role: .cancel) {}
         }
+        .confirmationDialog("Reset learned writing style?",
+                            isPresented: $showResetStyleConfirmation) {
+            Button("Reset", role: .destructive) { resetLearnedStyle() }
+            Button("Cancel", role: .cancel) {}
+        } message: {
+            Text("Deletes everything AskMail has learned about how you write. Future drafts use a neutral tone until new replies teach it again.")
+        }
     }
 
     /// Status + one-click fix for the local Ollama runtime, mirroring the Full
@@ -617,6 +662,65 @@ struct SettingsView: View {
             line += " \u{00B7} Failed \(draftEngine.failedCount)"
         }
         return line
+    }
+
+    /// Sender/domain exclusion-list editor (Phase 6, docs/draft-modus-plan.md):
+    /// no existing list-editor pattern in this codebase to build on, so this
+    /// is a minimal one -- a removable row per entry plus an add field.
+    @ViewBuilder
+    private var senderExclusionEditor: some View {
+        ForEach(settings.draftExcludedSenders, id: \.self) { entry in
+            HStack {
+                Text(entry).font(.caption)
+                Spacer()
+                Button {
+                    settings.draftExcludedSenders.removeAll { $0 == entry }
+                } label: {
+                    Image(systemName: "minus.circle")
+                }
+                .buttonStyle(.plain)
+                .foregroundStyle(.secondary)
+            }
+        }
+        HStack {
+            TextField("email@domain.com or domain.com", text: $newExcludedSender)
+                .font(.caption)
+                .onSubmit { addExcludedSender() }
+            Button("Add") { addExcludedSender() }
+                .disabled(newExcludedSender.trimmingCharacters(in: .whitespaces).isEmpty)
+        }
+        Text("Senders or domains listed here are never drafted for, even if they\u{2019}d otherwise look like personal mail.")
+            .font(.caption)
+            .foregroundStyle(.secondary)
+    }
+
+    private func addExcludedSender() {
+        let trimmed = newExcludedSender.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+        guard !trimmed.isEmpty, !settings.draftExcludedSenders.contains(trimmed) else {
+            newExcludedSender = ""
+            return
+        }
+        settings.draftExcludedSenders.append(trimmed)
+        newExcludedSender = ""
+    }
+
+    /// Reads a human label out of a `style_profiles` scope key
+    /// (`StyleScope`'s `"global"` / `"domain:<label>"` / `"address:<addr>"`).
+    private static func styleScopeLabel(_ scope: String) -> String {
+        if scope == StyleScope.global { return "Overall" }
+        if scope.hasPrefix("domain:") { return "Domain: \(scope.dropFirst("domain:".count))" }
+        if scope.hasPrefix("address:") { return String(scope.dropFirst("address:".count)) }
+        return scope
+    }
+
+    private func resetLearnedStyle() {
+        guard let store = try? DraftStore(path: SettingsStore.draftsDatabasePath) else { return }
+        do {
+            try store.deleteStyleProfiles()
+            draftEngine.refreshCounts()
+        } catch {
+            RollingLog.shared.log("reset learned style failed: \(error)", level: .error)
+        }
     }
 
     /// Human-readable name of the selected provider, for the privacy note.
