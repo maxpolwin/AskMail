@@ -200,6 +200,17 @@ public enum DraftJobProcessor {
                     continue
                 }
 
+                // Hard gate, same shape as isNoReplySender above: "newsletter"
+                // anywhere in the address (local part or domain) is certain
+                // bulk mail, skipped before classify's weak-signal/LLM path.
+                if NewsletterClassifier.isNewsletterAddress(email.sender) {
+                    RollingLog.shared.log("draft skip [newsletter in address] \(logLabel(email))", level: .debug)
+                    try draftStore.updateJobState(sourceID: job.sourceID, messageID: email.messageID,
+                                                  state: .newsletterSkipped, attempts: job.attempts,
+                                                  lastError: nil, updatedAt: updatedAt)
+                    continue
+                }
+
                 // User-configured sender/domain exclusion list (Phase 6,
                 // docs/draft-modus-plan.md), same hard-gate shape and same
                 // newsletterSkipped bucket as isNoReplySender above.

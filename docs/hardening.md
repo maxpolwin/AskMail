@@ -322,7 +322,7 @@ same one-unambiguous-DoD-per-item style.
 |---|---|---|
 | **H-24** ✅ | `drafts.db` gets the same lockdown as `askmail.db` — no weaker just because it's the newer, opt-in database. | `FileHardening.lockDown` is called at every `DraftStore.init` ([DraftStore.swift:127](../Sources/AskMailCore/DraftStore.swift)), identically to `SQLiteStore`: `ls -le` on `drafts.db` (+ `-wal`/`-shm`) shows `0600`, the containing directory `0700`, Time Machine + Spotlight excluded. |
 | **H-25** ✅ | Every Draft-Modus generation path is local-only, regardless of the user's configured Q&A provider (H-11's egress-transparency posture would otherwise be silently bypassed for unattended background work). | Grep confirms: `DraftEngine.runTick` ([DraftEngine.swift](../Sources/AskMailApp/DraftEngine.swift)) and `DraftServiceProvider.regenerateDraft` ([DraftServiceProvider.swift](../Sources/AskMailApp/DraftServiceProvider.swift)) both construct `OllamaClient(host: Defaults.ollamaLocalHost, …)` directly — neither reads `SettingsStore.provider`. `StyleLearner`'s merge call takes the same locally-constructed provider as an explicit parameter, never resolves its own. |
-| **H-26** ✅ | Phase 4's macOS Services-menu integration (`DraftServiceProvider`) adds no new OS permission and touches no new attack surface — a standard, unprivileged `NSServices` provider, reading/writing only `drafts.db`/`askmail.db` (already-granted FDA-derived local state) via the pasteboard AppKit already hands it. | `Packaging/AskMail.entitlements` is unchanged by Phase 4 (still the near-empty H-2 file); registration produces **no** FDA/Automation/Accessibility prompt at any point — confirmed live against Mail.app with a diagnostic provider using the identical `NSServices` mechanism (see the spike detail below). The real `insertDraft`/`regenerateDraft` methods are unit-tested (`DraftServiceMatcherTests`, `DraftJobProcessorTests`) but their live end-to-end behavior against a real Mail.app draft is a pending manual verification step — see the Draft-Modus verification playbook below. |
+| **H-26** ✅ | Phase 4's macOS Services-menu integration (`DraftServiceProvider`) adds no new OS permission and touches no new attack surface — a standard, unprivileged `NSServices` provider, reading/writing only `drafts.db`/`askmail.db` (already-granted FDA-derived local state) via the pasteboard AppKit already hands it. | `Packaging/AskMail.entitlements` is unchanged by Phase 4 (still the near-empty H-2 file); registration produces **no** FDA/Automation/Accessibility prompt at any point — confirmed live against Mail.app with a diagnostic provider using the identical `NSServices` mechanism (see the spike detail below). The real `insertDraft`/`regenerateDraft` methods are unit-tested (`DraftServiceMatcherTests`, `DraftJobProcessorTests`) and their live end-to-end behavior — including the later on-demand-generation follow-up (`docs/draft-modus-plan.md`'s "Phase 4 follow-up") — is confirmed live against a real Mail.app draft; see the Draft-Modus verification playbook below. |
 | **H-27** ⛔ | Phase 5's global-hotkey Mail Automation grant (AskMail's first-ever Automation grant) — scope and Accessibility decision, once it ships. | Not yet applicable: Phase 5 remains a stub in `docs/draft-modus-plan.md` pending its own live-Mac spikes (`sdef`, and whether insertion requires an Accessibility grant). This item gets a real DoD when that phase lands; the existing regression guard (`HotkeyManager.swift:40` — "no `CGEventTap`, no Accessibility grant") must stay true regardless of how Phase 5 resolves. |
 
 **Identification mechanism (H-26 detail):** a live-Mac spike (`docs/draft-modus-plan.md`
@@ -411,9 +411,13 @@ surface together, same spirit as the playbook above):
    (Copy / Open thread in Mail / Discard all still read-only, per
    `docs/draft-contract.md`).
 4. In Mail, open the same thread's reply, select the quoted text, invoke
-   "AskMail: Insert Draft" — the selection is replaced with the exact
-   `draft_text`; invoke "AskMail: Regenerate Draft" — the stored draft is
-   replaced and a subsequent "Insert" reflects the new text.
+   "AskMail: Insert Draft" — the draft is prepended above the kept quoted
+   text (two blank lines between); invoke "AskMail: Regenerate Draft" — the
+   stored draft is replaced and a subsequent "Insert" reflects the new text.
+   On a thread with no `ready` draft yet (never enqueued, or skipped by a
+   classification rule), either verb generates one on demand instead of
+   erroring — an immediate "Drafting a response…" message via the Services
+   error bezel, then a completion notification; Insert again once it lands.
 5. Settings ▸ "Draft-Modus: learned style": after enough real Sent replies
    have been learned from, confirm per-scope "learned from N replies"
    rows appear; "Reset learned style…" empties them (regression test:

@@ -147,6 +147,36 @@ final class StoreTests: XCTestCase {
         XCTAssertEqual(try store.watermark(), 1_772_439_240)
     }
 
+    func testLatestThreadIDFindsMostRecentMatchingSender() throws {
+        let store = try SQLiteStore.inMemory()
+        _ = try store.upsertMessage(messageID: "old@x", account: "acc", subject: "Older",
+                                    sender: "Max <max.polwin@posteo.de>", threadID: "thread-old",
+                                    dateUnix: 1_000)
+        _ = try store.upsertMessage(messageID: "new@x", account: "acc", subject: "Newer",
+                                    sender: "Max <max.polwin@posteo.de>", threadID: "thread-new",
+                                    dateUnix: 2_000)
+        XCTAssertEqual(try store.latestThreadID(fromSenderAddress: "max.polwin@posteo.de"), "thread-new")
+    }
+
+    func testLatestThreadIDNeverFalsePositivesOnASubstringOfADifferentAddress() throws {
+        let store = try SQLiteStore.inMemory()
+        _ = try store.upsertMessage(messageID: "a@x", account: "acc", subject: "S",
+                                    sender: "jblacksmith@corp.com", threadID: "thread-1", dateUnix: 1_000)
+        XCTAssertNil(try store.latestThreadID(fromSenderAddress: "smith@corp.com"))
+    }
+
+    func testLatestThreadIDReturnsNilWhenNoMessageMatches() throws {
+        let store = try SQLiteStore.inMemory()
+        XCTAssertNil(try store.latestThreadID(fromSenderAddress: "nobody@example.com"))
+    }
+
+    func testLatestThreadIDIgnoresMessagesWithoutAThreadID() throws {
+        let store = try SQLiteStore.inMemory()
+        _ = try store.upsertMessage(messageID: "a@x", account: "acc", subject: "S",
+                                    sender: "max@example.com", threadID: nil, dateUnix: 1_000)
+        XCTAssertNil(try store.latestThreadID(fromSenderAddress: "max@example.com"))
+    }
+
     func testDeleteAllResetsEverything() throws {
         let store = try makePopulatedStore()
         try store.setWatermark(123)

@@ -44,7 +44,7 @@ public enum DraftServiceMatcher {
     /// format the live-Mac spike observed. This substantially narrows, but
     /// (being a heuristic over plain text) can't fully eliminate, the
     /// cross-app false-positive risk.
-    static func quotedSenderEmail(in text: String) -> String? {
+    public static func quotedSenderEmail(in text: String) -> String? {
         let firstLine = text.prefix(while: { !$0.isNewline }).prefix(300)
         guard let ltIndex = firstLine.firstIndex(of: "<"),
               let gtIndex = firstLine[firstLine.index(after: ltIndex)...].firstIndex(of: ">") else {

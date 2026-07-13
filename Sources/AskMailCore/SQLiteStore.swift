@@ -232,6 +232,35 @@ public final class SQLiteStore {
         return results
     }
 
+    /// Resolves the most recent thread involving `address` directly from the
+    /// mailbox, independent of `drafts.db` entirely -- the manual-trigger
+    /// bypass (Insert/Regenerate) needs this because a thread that was never
+    /// enqueued, or was skipped by a classification rule (newsletter,
+    /// no-reply, exclusion list), has no row in `drafts.db` to match against
+    /// at all, yet the user explicitly asked for a draft anyway. SQL `LIKE`
+    /// is a coarse, index-free pre-filter over the most recent `scanLimit`
+    /// senders matching the substring; exact equality is re-checked in Swift
+    /// via `MailHeader.address(fromSender:)` since `sender` stores the raw
+    /// "Name <addr>" header, not a bare address.
+    public func latestThreadID(fromSenderAddress address: String, scanLimit: Int = 500) throws -> String? {
+        lock.lock(); defer { lock.unlock() }
+        var result: String?
+        try query("""
+        SELECT sender, thread_id FROM messages
+        WHERE thread_id IS NOT NULL AND sender LIKE ?
+        ORDER BY date_unix DESC LIMIT ?
+        """) { statement in
+            bind(statement, 1, "%\(address)%")
+            sqlite3_bind_int(statement, 2, Int32(scanLimit))
+        } row: { statement in
+            guard result == nil else { return }
+            let sender = column(statement, 0)
+            guard MailHeader.address(fromSender: sender)?.lowercased() == address.lowercased() else { return }
+            result = nullableColumn(statement, 1)
+        }
+        return result
+    }
+
     /// Reassigns every message in one thread group to another — the
     /// out-of-order-arrival merge (`ThreadResolver`).
     public func mergeThreads(from: String, to: String) throws {

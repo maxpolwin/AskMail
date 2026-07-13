@@ -47,6 +47,21 @@ final class OllamaEngine: ObservableObject {
         }
     }
 
+    /// Auto-start entry point: refreshes status and, only when Ollama is
+    /// installed but not answering (`.stopped`), calls `startOllama()` on the
+    /// caller's behalf. A no-op when already reachable (`.ready`/
+    /// `.runningModelMissing`) or when nothing is installed to start
+    /// (`.notInstalled` still needs the user to visit the download page) --
+    /// this exists purely to spare the user the manual Settings "Start"
+    /// click on the common "Ollama.app isn't currently running" path, at app
+    /// launch and before every Draft-Modus tick.
+    func ensureRunning() async {
+        await refresh()
+        if status == .stopped {
+            await startOllama()
+        }
+    }
+
     /// Launches Ollama.app when present (it manages its own daemon), else
     /// spawns the located CLI with `serve`, then polls until the daemon
     /// answers. Reports honestly if nothing came up.

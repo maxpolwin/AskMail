@@ -60,6 +60,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         // NSServices array. See DraftServiceProvider.swift.
         NSApp.servicesProvider = DraftServiceProvider()
         NSUpdateDynamicServices()
+
+        // Spare the user the manual Settings "Start" click when Ollama.app
+        // was quit separately from AskMail -- fire-and-forget, doesn't block
+        // launch; Settings' own checklist still reflects live status either way.
+        Task { await OllamaEngine.shared.ensureRunning() }
     }
 
     /// Installs a minimal main menu carrying the standard Edit commands.

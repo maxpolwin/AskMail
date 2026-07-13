@@ -84,6 +84,12 @@ final class DraftEngine: ObservableObject {
             refreshCounts()
         }
 
+        // Auto-start Ollama.app if it was quit separately from AskMail --
+        // otherwise every embed/chat call below fails with "connection
+        // refused" and the tick silently produces nothing. A no-op (a single
+        // cheap reachability check) on the common case where it's already up.
+        await OllamaEngine.shared.ensureRunning()
+
         // Snapshot the small bits of Settings state the detached work below
         // needs, on the main actor, before hopping off it. Perf fix (Task 3,
         // item 3): everything from here down used to run synchronously on
@@ -274,16 +280,18 @@ enum DraftNotifier {
         }
     }
 
-    /// "Regenerate" (Phase 4 Services menu) completion. A distinct
-    /// identifier namespace ("draft-regenerated-") from `newlyReadyDrafts`'
-    /// ("draft-ready-\(pk)") so regenerating an existing thread's draft
-    /// never collides with, or gets silently deduped against, that thread's
-    /// original "ready" notification.
+    /// "Regenerate"/on-demand-"Insert" (Phase 4 Services menu) completion --
+    /// shared by both since Insert's manual-trigger fallback (no existing
+    /// ready draft) generates on demand exactly the same way Regenerate
+    /// does. A distinct identifier namespace ("draft-regenerated-") from
+    /// `newlyReadyDrafts`' ("draft-ready-\(pk)") so this never collides
+    /// with, or gets silently deduped against, a thread's original
+    /// scheduled-tick "ready" notification.
     static func notify(regeneratedDraftSubject subject: String) async {
         await withAuthorization { center in
             let content = UNMutableNotificationContent()
             content.title = "AskMail"
-            content.body = "Draft regenerated: \(subject.isEmpty ? "(no subject)" : subject)"
+            content.body = "Draft ready: \(subject.isEmpty ? "(no subject)" : subject)"
             let request = UNNotificationRequest(
                 identifier: "draft-regenerated-\(UUID().uuidString)", content: content, trigger: nil)
             try await center.add(request)

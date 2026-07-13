@@ -88,8 +88,16 @@ Done and under test:
 - Draft-Modus (docs/draft-modus-plan.md phases 1–4): background classification
   and local-only reply drafting for ordinary inbox mail, style learning from
   actually-sent replies, a Settings toggle, a read-only Drafts window
-  (copy / open thread in Mail / discard — never auto-sent or inserted), and a
-  best-effort notification when a draft is ready.
+  (copy / open thread in Mail / discard — never auto-sent), and a best-effort
+  notification when a draft is ready. A macOS Services menu ("AskMail: Insert
+  Draft" / "AskMail: Regenerate Draft" — select the quoted reply text in Mail,
+  right-click ▸ Services) prepends the draft above the kept quoted
+  conversation; both verbs bypass every auto-draft eligibility rule
+  (newsletter/no-reply classification, sender exclusion, the master toggle)
+  when explicitly invoked, generating on demand if nothing was drafted yet —
+  never auto-inserted without that click. Local Ollama auto-starts itself
+  (app launch, every tick, every Services invocation) if it was quit
+  separately from AskMail.
 - Egress control (hardening H-10/H-11): a compiled-in host allowlist in front
   of every outbound request, embeddings structurally loopback-only, a live
   "sent to <host>" indicator in the panel, and a per-session egress audit

@@ -19,13 +19,18 @@ import Foundation
 /// UI when nothing usable is selected -- see `DraftServiceMatcher.MatchError`.
 final class DraftServiceProvider: NSObject {
 
-    /// "Insert draft": replaces the selected quoted text with the matching
-    /// thread's latest `ready` draft. Synchronous by necessity -- Services
-    /// insertion works by the provider writing replacement data back to the
-    /// same pasteboard before this method returns, which AppKit then reads
-    /// to update the document. `DraftStore`/`SQLiteStore` reads are already
-    /// synchronous, bounded SQLite calls (same as `DraftsViewModel`'s own
-    /// main-thread reads), so no async hop is needed or possible here.
+    /// "Insert draft": prepends the matching thread's latest `ready` draft
+    /// above the selected quoted text, keeping that quoted conversation
+    /// intact below it (two blank lines between the two) rather than
+    /// discarding it -- the selection is only ever used to *identify* the
+    /// thread (`DraftServiceMatcher`), never dropped from the document.
+    /// Synchronous by necessity -- Services insertion works by the provider
+    /// writing replacement data back to the same pasteboard before this
+    /// method returns, which AppKit then reads to update the document.
+    /// `DraftStore`/`SQLiteStore` reads are already synchronous, bounded
+    /// SQLite calls (same as `DraftsViewModel`'s own main-thread reads), so
+    /// no async hop is needed or possible here -- unless no `ready` draft
+    /// exists yet, which falls through to the on-demand path below.
     @objc func insertDraft(_ pboard: NSPasteboard, userData: String,
                            error errorPtr: AutoreleasingUnsafeMutablePointer<NSString?>) {
         guard let selection = Self.selectionText(from: pboard) else {
@@ -39,7 +44,27 @@ final class DraftServiceProvider: NSObject {
                                                        askStore: askStore)
             pboard.clearContents()
             pboard.declareTypes([.string], owner: nil)
-            pboard.setString(match.draftText, forType: .string)
+            pboard.setString(match.draftText + "\n\n\n" + selection, forType: .string)
+        } catch DraftServiceMatcher.MatchError.noDraftForSender {
+            // No ready draft exists -- e.g. never enqueued, or skipped by a
+            // classification rule (newsletter, no-reply, exclusion list).
+            // Those rules exist for *unattended* background drafting; a user
+            // who explicitly clicked Insert has already supplied the consent
+            // they exist to approximate, so generate on the fly instead of
+            // just erroring. Can't hold this synchronous Services call open
+            // for the LLM call (nor push into Mail's already-returned-from
+            // compose window without Phase 5's Automation grant), so this
+            // invocation can't insert *itself* -- it kicks the generation off
+            // and tells the user via errorPtr (the only synchronous UI a
+            // classic Service has); a completion notification follows, and
+            // the next Insert click (the fast path above) picks it up.
+            guard let email = DraftServiceMatcher.quotedSenderEmail(in: selection) else {
+                errorPtr.pointee = "Select the quoted original message first." as NSString
+                return
+            }
+            errorPtr.pointee =
+                "Drafting a response now \u{2014} choose Insert again in a few seconds." as NSString
+            Self.generateOnDemandDetached(forSenderAddress: email)
         } catch let matchError as DraftServiceMatcher.MatchError {
             errorPtr.pointee = matchError.description as NSString
         } catch {
@@ -50,70 +75,85 @@ final class DraftServiceProvider: NSObject {
 
     /// "Regenerate draft": re-runs drafting for the matched thread on
     /// demand, bypassing the scheduler's cadence, and replaces the stored
-    /// draft so the next "Insert" reflects it. Genuinely asynchronous (a
-    /// local-LLM call), so this declares no `NSReturnTypes` (nothing is
-    /// expected back synchronously) and returns immediately after kicking
-    /// the work off on a detached task -- mirroring `DraftEngine.runTick`'s
-    /// own reason for hopping off the calling thread before any SQLite/LLM
-    /// work, since this method (like `runTick`) is invoked on the main thread.
+    /// draft so the next "Insert" reflects it. Bypasses every auto-draft
+    /// eligibility rule (Draft-Modus master toggle, sender exclusion list,
+    /// newsletter/no-reply classification) for the same reason Insert's
+    /// on-demand path above does -- those gate unattended background
+    /// drafting, and an explicit Regenerate click is its own consent.
+    /// Genuinely asynchronous (a local-LLM call), so this declares no
+    /// `NSReturnTypes` (nothing is expected back synchronously) and returns
+    /// immediately after kicking the work off -- mirroring
+    /// `DraftEngine.runTick`'s own reason for hopping off the calling
+    /// thread before any SQLite/LLM work, since this method (like
+    /// `runTick`) is invoked on the main thread.
     @objc func regenerateDraft(_ pboard: NSPasteboard, userData: String,
                                error errorPtr: AutoreleasingUnsafeMutablePointer<NSString?>) {
-        // Draft-Modus's master opt-in gate (SettingsStore.draftModeEnabled)
-        // must hold for *every* path that runs mail content through the
-        // local LLM, not just the scheduled tick -- DraftEngine.runTick
-        // checks this as its very first line; Regenerate is the same kind
-        // of background processing and must be gated identically. Insert
-        // (above) is deliberately exempt: it only reads an already-
-        // generated draft, the same way the always-available Drafts window
-        // does, so it's fine regardless of the toggle.
-        guard SettingsStore.shared.draftModeEnabled else {
-            errorPtr.pointee = "Turn on Draft-Modus in AskMail Settings first." as NSString
-            return
-        }
         guard let selection = Self.selectionText(from: pboard) else {
             errorPtr.pointee = "Select the quoted original message first." as NSString
             return
         }
-        // Snapshot on the calling (main) thread before hopping off, same
-        // reasoning as DraftEngine.runTick's own snapshot-then-detach.
+        guard let email = DraftServiceMatcher.quotedSenderEmail(in: selection) else {
+            errorPtr.pointee = "Select the quoted original message first." as NSString
+            return
+        }
+        errorPtr.pointee =
+            "Drafting a response now \u{2014} you\u{2019}ll get a notification when it\u{2019}s ready." as NSString
+        Self.generateOnDemandDetached(forSenderAddress: email, preferredSelection: selection)
+    }
+
+    /// Resolves a thread for `email` and generates a fresh draft for it,
+    /// unconditionally -- shared by Insert's on-demand fallback and
+    /// Regenerate. `preferredSelection`, when given (Regenerate always has
+    /// one; Insert's fallback only has the bare email), lets `match` reuse
+    /// an existing `ready` draft's thread first (a cheap DB lookup) before
+    /// falling back to `SQLiteStore.latestThreadID`, which scans the mailbox
+    /// directly and is the only path available for a thread that was never
+    /// drafted at all.
+    private static func generateOnDemandDetached(forSenderAddress email: String, preferredSelection: String? = nil) {
         let settings = SettingsStore.shared
         let localChatModel = settings.localChatModel
         let embeddingModel = settings.embeddingModel
-        let excludedSenders = settings.draftExcludedSenders
         let accountEmail = settings.accountEmail
 
         Task.detached(priority: .userInitiated) {
             do {
                 let draftStore = try DraftStore(path: SettingsStore.draftsDatabasePath)
                 let askStore = try SQLiteStore(path: SettingsStore.databasePath)
-                let match = try DraftServiceMatcher.match(selectionText: selection, draftStore: draftStore,
-                                                          askStore: askStore)
-                // The sender/domain exclusion list (Phase 6) applies here
-                // too -- a correspondent the user explicitly opted out of
-                // must not be re-drafted just because a stale ready draft
-                // from before the exclusion was added still exists.
-                guard !SenderExclusion.isExcluded(match.sender, excluded: excludedSenders) else {
-                    RollingLog.shared.log("DraftService regenerate skipped: sender is excluded", level: .info)
+
+                let threadID: String
+                if let preferredSelection,
+                   let match = try? DraftServiceMatcher.match(selectionText: preferredSelection,
+                                                              draftStore: draftStore, askStore: askStore) {
+                    threadID = match.threadID
+                } else if let resolved = try askStore.latestThreadID(fromSenderAddress: email) {
+                    threadID = resolved
+                } else {
+                    RollingLog.shared.log("DraftService on-demand: no mailbox thread found for \(email)",
+                                          level: .info)
                     return
                 }
+
+                // Same auto-start as DraftEngine.runTick -- this path calls
+                // Ollama directly rather than through a scheduled tick, so it
+                // needs its own guard against "daemon was quit since AskMail
+                // launched" instead of failing silently.
+                await OllamaEngine.shared.ensureRunning()
                 // Local-only regardless of the configured Q&A provider,
                 // matching every other Draft-Modus generation path (H-11).
                 let chatProvider = OllamaClient(host: Defaults.ollamaLocalHost, model: localChatModel)
                 let embedder = OllamaEmbedder(model: embeddingModel)
                 let record = try await DraftJobProcessor.regenerateDraft(
-                    threadID: match.threadID, draftStore: draftStore, askStore: askStore,
+                    threadID: threadID, draftStore: draftStore, askStore: askStore,
                     chatProvider: chatProvider, embedder: embedder, accountEmail: accountEmail)
-                // This regenerate already notifies below -- advance the
-                // scheduled tick's own "newly ready" cursor past this row
-                // first, so the next tick's notifyNewlyReadyDrafts doesn't
-                // also send a second notification for the same draft.
+                // This already notifies below -- advance the scheduled
+                // tick's own "newly ready" cursor past this row first, so
+                // the next tick's notifyNewlyReadyDrafts doesn't also send a
+                // second notification for the same draft.
                 DraftEngine.skipNotifying(forDraftPk: record.pk, draftStore: draftStore)
                 await DraftNotifier.notify(regeneratedDraftSubject: record.subject)
                 await MainActor.run { DraftEngine.shared.refreshCounts() }
-            } catch let matchError as DraftServiceMatcher.MatchError {
-                RollingLog.shared.log("DraftService regenerate: \(matchError.description)", level: .info)
             } catch {
-                RollingLog.shared.log("DraftService regenerate failed: \(error)", level: .error)
+                RollingLog.shared.log("DraftService on-demand generation failed: \(error)", level: .error)
             }
         }
     }

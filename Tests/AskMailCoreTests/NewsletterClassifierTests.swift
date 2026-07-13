@@ -43,6 +43,32 @@ final class NewsletterClassifierTests: XCTestCase {
         XCTAssertTrue(NewsletterClassifier.isNoReplySender("NoReply@Example.com"))
     }
 
+    // MARK: isNewsletterAddress (hard "never reply" gate, whole address)
+
+    func testNewsletterInLocalPartIsDetected() {
+        XCTAssertTrue(NewsletterClassifier.isNewsletterAddress("newsletter@example.com"))
+    }
+
+    func testNewsletterInDomainIsDetected() {
+        XCTAssertTrue(NewsletterClassifier.isNewsletterAddress("bafinDE@newsletter.gsb.bund.de"))
+    }
+
+    func testNewsletterWithDisplayNameIsDetected() {
+        XCTAssertTrue(NewsletterClassifier.isNewsletterAddress("Acme <updates@newsletter.acme.com>"))
+    }
+
+    func testCaseInsensitiveNewsletterIsDetected() {
+        XCTAssertTrue(NewsletterClassifier.isNewsletterAddress("Info@NEWSLETTER.example.com"))
+    }
+
+    func testOrdinaryAddressWithoutNewsletterIsNotDetected() {
+        XCTAssertFalse(NewsletterClassifier.isNewsletterAddress("max@example.com"))
+    }
+
+    func testUnparseableAddressIsNotDetected() {
+        XCTAssertFalse(NewsletterClassifier.isNewsletterAddress("not an address"))
+    }
+
     func testUnrelatedLocalPartResemblingNoReplyIsNotDetected() {
         // "notreply" must not false-positive as a "noreply" prefix match.
         XCTAssertFalse(NewsletterClassifier.isNoReplySender("notreply@example.com"))

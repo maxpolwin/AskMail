@@ -55,6 +55,19 @@ public enum NewsletterClassifier {
         return noReplyLocalParts.contains { part.hasPrefix($0) }
     }
 
+    /// Hard "never reply" rule, checked by the caller alongside
+    /// `isNoReplySender`: a sender address with "newsletter" anywhere in it
+    /// -- local part (`newsletter@...`) or domain (`...@newsletter.example.
+    /// com`, the shape that slipped through as a drafted "ready" reply
+    /// before this existed) -- is certain bulk mail. Deliberately a full
+    /// substring match over the whole address, not `matchesNewsletterLocalPart`
+    /// below's local-part-*prefix*-only check, which stays a weak signal
+    /// that still needs `classify`'s boilerplate/LLM corroboration.
+    public static func isNewsletterAddress(_ sender: String) -> Bool {
+        guard let address = MailHeader.address(fromSender: sender) else { return false }
+        return address.contains("newsletter")
+    }
+
     /// Order: strong header signals (`List-Unsubscribe`/`List-Id`/
     /// `Precedence: bulk|list|junk`) decide alone. Otherwise, a weak sender
     /// local-part pattern and a weak boilerplate tie-break
