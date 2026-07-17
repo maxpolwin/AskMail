@@ -22,9 +22,8 @@ selected.
 | `Tests/Fixtures/` | synthetic .emlx files, safe to commit (see its README) |
 | `Tests/Evals/` | retrieval.jsonl (fill with real Message-IDs) and generation.jsonl |
 
-The requirements & technical spec (Sections A/B) lives outside the repo for
-now; docs/ carries the build-relevant contracts. Add it as
-`docs/requirements.md` when finalized.
+The requirements & technical spec (Sections A/B) lives outside the repo;
+docs/ carries the build-relevant contracts.
 
 ## Build & test
 

@@ -123,9 +123,9 @@ public final class MailboxIngestor {
         return IngestSummary(ingested: ingested, failed: failed, newWatermark: newWatermark)
     }
 
-    /// Consecutive embed-connection failures that mean the backend is down (not
-    /// a one-off), after which the run aborts instead of failing every remaining
-    /// message. Small so a dead Ollama is reported within seconds.
+    /// Embed-connection attempts per flush before the backend is considered
+    /// down (not hiccuping) and the run aborts instead of failing every
+    /// remaining message. Small so a dead Ollama is reported within seconds.
     static let unreachableAbortThreshold = 3
 
     /// Incremental ingest (FR-5): processes only files new or changed since the
@@ -160,8 +160,70 @@ public final class MailboxIngestor {
         var failed = 0
         var skipped = 0
         var empty = 0
-        var consecutiveUnreachable = 0
         var maxDate: Int64 = (try? store.watermark()) ?? 0
+
+        // Cross-message embed batching: most emails yield 1–3 chunks, so
+        // embedding per message means ~one HTTP round trip per email.
+        // Parsed messages accumulate here until their chunks fill at least
+        // one embed batch, then `flush` embeds and stores the whole group.
+        // Fingerprints are still recorded per message, only after its chunks
+        // are stored, so crash/failure recovery semantics are unchanged.
+        var pending: [(file: EmlxFile, message: PendingMessage)] = []
+        var pendingChunks = 0
+
+        func flush() async throws {
+            guard !pending.isEmpty else { return }
+            defer { pending.removeAll(); pendingChunks = 0 }
+            do {
+                // A connection failure is retried up to the threshold before
+                // the run aborts (below): a backend that is down, not
+                // hiccuping, must be reported within seconds — not ground
+                // through the whole mailbox as per-file failures. Retries are
+                // safe: nothing is stored until every embed call succeeded.
+                var attempts = 0
+                while true {
+                    do {
+                        try await embedAndStore(pending.map(\.message))
+                        break
+                    } catch {
+                        attempts += 1
+                        guard Self.isConnectionError(error),
+                              attempts < Self.unreachableAbortThreshold else { throw error }
+                        log("ingest embed retry \(attempts) after connection failure", .error)
+                    }
+                }
+                for entry in pending {
+                    try store.recordIngested(sourceID: entry.file.sourceID, fingerprint: entry.file.fingerprint)
+                    try? store.clearIngestFailure(sourceID: entry.file.sourceID)
+                    // A zero-chunk message (empty body, nothing extractable) is
+                    // done — but it added no searchable content, so it doesn't
+                    // count as "new" (adjacent cleanup #1).
+                    if entry.message.pieces.isEmpty { empty += 1 } else { ingested += 1 }
+                    maxDate = max(maxDate, entry.message.email.dateUnix)
+                }
+            } catch {
+                // A missing embedding model is a setup error, not a per-file
+                // fault: it will fail every remaining message identically, so
+                // abort now with an actionable message instead of recording
+                // thousands of identical failures.
+                if let model = Self.missingEmbeddingModel(error) {
+                    log("ingest aborted: embedding model \(model) not installed; \(ingested) done this run", .error)
+                    throw IngestError.embeddingModelMissing(model: model)
+                }
+                // Any other embed failure fails the whole group; each member
+                // is recorded for the targeted retry pass, same as before.
+                failed += pending.count
+                for entry in pending {
+                    log("ingest FAILED file=\(entry.file.url.lastPathComponent) error=\(error)", .error)
+                    try? store.recordIngestFailure(sourceID: entry.file.sourceID, path: entry.file.url.path,
+                                                   error: String(describing: error))
+                }
+                if Self.isConnectionError(error) {
+                    log("ingest aborted after \(Self.unreachableAbortThreshold) connection failures; \(ingested) done this run", .error)
+                    throw IngestError.embedderUnreachable
+                }
+            }
+        }
 
         for (index, file) in files.enumerated() {
             if let seen = try? store.ingestedFingerprint(sourceID: file.sourceID),
@@ -172,40 +234,21 @@ public final class MailboxIngestor {
             }
             do {
                 let email = try await parser.parse(fileURL: file.url)
-                let chunkCount = try await ingest(email: email)
-                try store.recordIngested(sourceID: file.sourceID, fingerprint: file.fingerprint)
-                try? store.clearIngestFailure(sourceID: file.sourceID)
-                // A zero-chunk message (empty body, nothing extractable) is
-                // done — but it added no searchable content, so it doesn't
-                // count as "new" (adjacent cleanup #1).
-                if chunkCount == 0 { empty += 1 } else { ingested += 1 }
-                consecutiveUnreachable = 0
-                maxDate = max(maxDate, email.dateUnix)
+                let message = PendingMessage(email: email, pieces: pieces(for: email))
+                pending.append((file, message))
+                pendingChunks += message.pieces.count
             } catch {
-                // A missing embedding model is a setup error, not a per-file
-                // fault: it will fail every remaining message identically, so
-                // abort now with an actionable message instead of recording
-                // thousands of identical failures.
-                if let model = Self.missingEmbeddingModel(error) {
-                    log("ingest aborted: embedding model \(model) not installed; \(ingested) done this run", .error)
-                    throw IngestError.embeddingModelMissing(model: model)
-                }
                 failed += 1
                 log("ingest FAILED file=\(file.url.lastPathComponent) error=\(error)", .error)
                 try? store.recordIngestFailure(sourceID: file.sourceID, path: file.url.path,
                                                error: String(describing: error))
-                if Self.isConnectionError(error) {
-                    consecutiveUnreachable += 1
-                    if consecutiveUnreachable >= Self.unreachableAbortThreshold {
-                        log("ingest aborted after \(consecutiveUnreachable) consecutive connection failures; \(ingested) done this run", .error)
-                        throw IngestError.embedderUnreachable
-                    }
-                } else {
-                    consecutiveUnreachable = 0
-                }
+            }
+            if pendingChunks >= Defaults.embedBatchSize {
+                try await flush()
             }
             progress?(IngestProgress(processed: index + 1, total: files.count))
         }
+        try await flush()
 
         var newWatermark: Int64? = nil
         if maxDate > 0 {
@@ -241,6 +284,19 @@ public final class MailboxIngestor {
     /// method never calls PDFKit itself (hardening H-6).
     @discardableResult
     public func ingest(email: IngestableEmail) async throws -> Int {
+        let message = PendingMessage(email: email, pieces: pieces(for: email))
+        try await embedAndStore([message])
+        return message.pieces.count
+    }
+
+    /// A parsed message queued for the next embed-and-store flush.
+    private struct PendingMessage {
+        let email: IngestableEmail
+        let pieces: [(source: ChunkSource, text: String)]
+    }
+
+    /// Chunks a message's body and PDF text into the pieces to embed.
+    private func pieces(for email: IngestableEmail) -> [(source: ChunkSource, text: String)] {
         var pieces: [(source: ChunkSource, text: String)] = []
         for text in chunker.chunk(email.bodyText) {
             pieces.append((.body, text))
@@ -257,41 +313,60 @@ public final class MailboxIngestor {
         for skippedName in email.skippedAttachments {
             log("ingest skip attachment=\(skippedName) (over size cap)", .debug)
         }
+        return pieces
+    }
+
+    /// Embeds every piece of every message (in `Defaults.embedBatchSize`
+    /// batches spanning message boundaries), then stores each message.
+    ///
+    /// Draft-Modus §3: the thread id is resolved for every ingested message
+    /// (not just a future opt-in path) since thread reconstruction needs full
+    /// history to work, and this is the one store-write path every ingest
+    /// entry point shares.
+    ///
+    /// One transaction per message: thread resolution, the message row, its
+    /// refs, and all chunks land in a single commit instead of one implicit
+    /// fsync per statement — the dominant cost of large runs.
+    private func embedAndStore(_ batch: [PendingMessage]) async throws {
+        let texts = batch.flatMap { $0.pieces.map(\.text) }
 
         // Embed in batches sized to memory pressure (docs/defaults.md).
         var embeddings: [[Float]] = []
+        embeddings.reserveCapacity(texts.count)
         var cursor = 0
-        while cursor < pieces.count {
-            let end = min(cursor + Defaults.embedBatchSize, pieces.count)
-            let batch = Array(pieces[cursor..<end]).map(\.text)
-            embeddings.append(contentsOf: try await embedder.embed(batch))
+        while cursor < texts.count {
+            let end = min(cursor + Defaults.embedBatchSize, texts.count)
+            embeddings.append(contentsOf: try await embedder.embed(Array(texts[cursor..<end])))
             cursor = end
         }
 
-        // Draft-Modus §3: resolved for every ingested message (not just a
-        // future opt-in path) since thread reconstruction needs full history
-        // to work, and this is the one ingest call site both the hourly
-        // Vectorizer and any future draft-triggered ingest share.
-        let threadID = try ThreadResolver.resolveThread(messageID: email.messageID,
-                                                        inReplyTo: email.inReplyTo,
-                                                        references: email.references,
-                                                        store: store)
-        let pk = try store.upsertMessage(messageID: email.messageID,
-                                         account: account,
-                                         subject: email.subject,
-                                         sender: email.sender,
-                                         originalSender: email.originalSender,
-                                         inReplyTo: email.inReplyTo,
-                                         referencesIDs: email.references,
-                                         threadID: threadID,
-                                         bodyText: email.bodyText,
-                                         dateUnix: email.dateUnix)
-        let rows = pieces.enumerated().map { index, piece in
-            (source: piece.source,
-             text: piece.text,
-             embedding: index < embeddings.count ? embeddings[index] : nil)
+        var offset = 0
+        for message in batch {
+            let email = message.email
+            let rows = message.pieces.enumerated().map { index, piece in
+                (source: piece.source,
+                 text: piece.text,
+                 embedding: offset + index < embeddings.count ? embeddings[offset + index] : nil)
+            }
+            offset += message.pieces.count
+
+            try store.transaction {
+                let threadID = try ThreadResolver.resolveThread(messageID: email.messageID,
+                                                                inReplyTo: email.inReplyTo,
+                                                                references: email.references,
+                                                                store: store)
+                let pk = try store.upsertMessage(messageID: email.messageID,
+                                                 account: account,
+                                                 subject: email.subject,
+                                                 sender: email.sender,
+                                                 originalSender: email.originalSender,
+                                                 inReplyTo: email.inReplyTo,
+                                                 referencesIDs: email.references,
+                                                 threadID: threadID,
+                                                 bodyText: email.bodyText,
+                                                 dateUnix: email.dateUnix)
+                try store.replaceChunks(messagePk: pk, chunks: rows)
+            }
         }
-        try store.replaceChunks(messagePk: pk, chunks: rows)
-        return rows.count
     }
 }

@@ -66,7 +66,7 @@ private final class ResetMidMergeChatProvider: ChatProvider, @unchecked Sendable
         triggered = true
         lock.unlock()
         if shouldTrigger {
-            try? draftStore.deleteStyleProfiles()
+            _ = try? draftStore.deleteStyleProfiles()
         }
         return AsyncThrowingStream { continuation in
             continuation.yield("merged profile text")

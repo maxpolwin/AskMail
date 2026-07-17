@@ -43,6 +43,37 @@ final class ParserHardeningTests: XCTestCase {
         }
     }
 
+    // The same guard must hold on the production path: XPCEmailParser runs
+    // in the FDA-holding host and must reject from FileManager attributes
+    // before Data(contentsOf:) — proven the same way as above (invalid
+    // content + tiny cap → a size error means nothing was parsed, and the
+    // throw happens before any XPC connection is opened).
+    func testOversizeEmlxFileRejectedOnXPCClientPath() async throws {
+        let dir = try tempDir()
+        defer { try? FileManager.default.removeItem(at: dir) }
+        let path = dir.appendingPathComponent("oversize.emlx")
+        try Data("this content is longer than five bytes".utf8).write(to: path)
+
+        do {
+            _ = try await XPCEmailParser(maxEmlxBytes: 5).parse(fileURL: path)
+            XCTFail("expected oversize file to be rejected")
+        } catch EmlxParseError.malformed(let reason) {
+            XCTAssertTrue(reason.contains("exceeds max"), "expected a size-cap error, got: \(reason)")
+        }
+    }
+
+    // Defense in depth: parse(data:) enforces the total-size cap too, so the
+    // sandboxed XPC service re-checks bytes it received over the wire.
+    func testOversizeEmlxDataRejectedByDataEntryPoint() {
+        let data = Data("this content is longer than five bytes".utf8)
+        XCTAssertThrowsError(try EmlxParser.parse(data: data, maxEmlxBytes: 5)) { error in
+            guard case EmlxParseError.malformed(let reason) = error else {
+                return XCTFail("expected .malformed, got \(error)")
+            }
+            XCTAssertTrue(reason.contains("exceeds max"), "expected a size-cap error, got: \(reason)")
+        }
+    }
+
     // A file within the injected cap parses normally -- the guard doesn't
     // over-reject.
     func testFileWithinCapStillParses() throws {

@@ -40,7 +40,9 @@ public enum Keychain {
     /// on every call. Tests override this to force the legacy fallback path
     /// deterministically, instead of depending on the ambient entitlement
     /// state of whatever machine/CI runs `swift test` (H-16).
-    static var dataProtectionProbe: () -> Bool = { true }
+    /// `nonisolated(unsafe)`: written only by tests, before any Keychain
+    /// call, on a single thread — never mutated mid-flight in production.
+    nonisolated(unsafe) static var dataProtectionProbe: @Sendable () -> Bool = { true }
 
     /// Tracks whether this process has already observed
     /// `errSecMissingEntitlement` from a live data-protection Keychain call,

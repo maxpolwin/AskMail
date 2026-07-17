@@ -92,13 +92,15 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         let editItem = NSMenuItem()
         mainMenu.addItem(editItem)
         let editMenu = NSMenu(title: "Edit")
-        editMenu.addItem(withTitle: "Undo", action: Selector(("undo:")), keyEquivalent: "z")
-        let redo = editMenu.addItem(withTitle: "Redo", action: Selector(("redo:")), keyEquivalent: "z")
+        // undo:/redo: have no importable declaration (they're informal field-
+        // editor actions), so they stay string-built via NSSelectorFromString.
+        editMenu.addItem(withTitle: "Undo", action: NSSelectorFromString("undo:"), keyEquivalent: "z")
+        let redo = editMenu.addItem(withTitle: "Redo", action: NSSelectorFromString("redo:"), keyEquivalent: "z")
         redo.keyEquivalentModifierMask = [.command, .shift]
         editMenu.addItem(.separator())
-        editMenu.addItem(withTitle: "Cut", action: Selector(("cut:")), keyEquivalent: "x")
-        editMenu.addItem(withTitle: "Copy", action: Selector(("copy:")), keyEquivalent: "c")
-        editMenu.addItem(withTitle: "Paste", action: Selector(("paste:")), keyEquivalent: "v")
+        editMenu.addItem(withTitle: "Cut", action: #selector(NSText.cut(_:)), keyEquivalent: "x")
+        editMenu.addItem(withTitle: "Copy", action: #selector(NSText.copy(_:)), keyEquivalent: "c")
+        editMenu.addItem(withTitle: "Paste", action: #selector(NSText.paste(_:)), keyEquivalent: "v")
         editMenu.addItem(withTitle: "Select All", action: #selector(NSResponder.selectAll(_:)), keyEquivalent: "a")
         editItem.submenu = editMenu
 

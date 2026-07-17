@@ -131,9 +131,6 @@ public enum HtmlText {
     private static let blankLineRunRegex =
         try! NSRegularExpression(pattern: "\\n{3,}", options: [.caseInsensitive])
 
-    private static let numericEntityRegex =
-        try! NSRegularExpression(pattern: "&#(x?)([0-9a-fA-F]+);")
-
     private static let boilerplateRegex = try! NSRegularExpression(pattern: [
         "unsubscribe",
         "abmelden",
@@ -153,30 +150,67 @@ public enum HtmlText {
         return regex.stringByReplacingMatches(in: text, range: range, withTemplate: template)
     }
 
+    private static let namedEntities: [String: String] = [
+        "&amp;": "&", "&lt;": "<", "&gt;": ">", "&quot;": "\"",
+        "&apos;": "'", "&nbsp;": " ",
+        "&auml;": "\u{00e4}", "&ouml;": "\u{00f6}", "&uuml;": "\u{00fc}",
+        "&Auml;": "\u{00c4}", "&Ouml;": "\u{00d6}", "&Uuml;": "\u{00dc}",
+        "&szlig;": "\u{00df}", "&euro;": "\u{20ac}",
+    ]
+
+    /// Longest token `decodeEntities` will consider: "&#x10FFFF;" (the
+    /// largest valid hex scalar) and every named entity fit well within it.
+    private static let maxEntityLength = 12
+
+    /// Resolves named and numeric (`&#dd;`/`&#xhh;`) entities in ONE scan —
+    /// this runs on every HTML email at ingest, where a
+    /// replacingOccurrences pass per named entity was ~15 full-string scans.
+    /// Unknown or malformed entities are left verbatim, as before.
     static func decodeEntities(_ text: String) -> String {
-        var out = text
-        let named: [String: String] = [
-            "&amp;": "&", "&lt;": "<", "&gt;": ">", "&quot;": "\"",
-            "&apos;": "'", "&#39;": "'", "&nbsp;": " ",
-            "&auml;": "\u{00e4}", "&ouml;": "\u{00f6}", "&uuml;": "\u{00fc}",
-            "&Auml;": "\u{00c4}", "&Ouml;": "\u{00d6}", "&Uuml;": "\u{00dc}",
-            "&szlig;": "\u{00df}", "&euro;": "\u{20ac}",
-        ]
-        for (entity, value) in named {
-            out = out.replacingOccurrences(of: entity, with: value)
-        }
-        // Numeric entities, decimal and hex.
-        let matches = numericEntityRegex.matches(in: out, range: NSRange(out.startIndex..., in: out)).reversed()
-        for match in matches {
-            guard let full = Range(match.range, in: out),
-                  let hexFlag = Range(match.range(at: 1), in: out),
-                  let digits = Range(match.range(at: 2), in: out) else { continue }
-            let radix = out[hexFlag].isEmpty ? 10 : 16
-            if let value = UInt32(out[digits], radix: radix),
-               let scalar = Unicode.Scalar(value) {
-                out.replaceSubrange(full, with: String(Character(scalar)))
+        guard text.utf8.contains(UInt8(ascii: "&")) else { return text }
+        var out = String()
+        out.reserveCapacity(text.count)
+        var index = text.startIndex
+        while index < text.endIndex {
+            let char = text[index]
+            guard char == "&" else {
+                out.append(char)
+                index = text.index(after: index)
+                continue
+            }
+            // Find the terminating ';' within the longest decodable token.
+            var end = index
+            var semicolon: String.Index?
+            for _ in 0...maxEntityLength {
+                guard end < text.endIndex else { break }
+                if text[end] == ";" { semicolon = end; break }
+                end = text.index(after: end)
+            }
+            if let semicolon, let decoded = decodeEntityToken(String(text[index...semicolon])) {
+                out.append(decoded)
+                index = text.index(after: semicolon)
+            } else {
+                out.append(char)
+                index = text.index(after: index)
             }
         }
         return out
+    }
+
+    /// "&amp;" → "&", "&#65;"/"&#x41;" → "A"; nil for anything unknown or
+    /// out of Unicode range (the caller leaves the original text in place).
+    private static func decodeEntityToken(_ token: String) -> String? {
+        if let named = namedEntities[token] { return named }
+        guard token.hasPrefix("&#"), token.hasSuffix(";") else { return nil }
+        var digits = token.dropFirst(2).dropLast()
+        var radix = 10
+        if digits.first == "x" || digits.first == "X" {
+            radix = 16
+            digits = digits.dropFirst()
+        }
+        guard !digits.isEmpty,
+              let value = UInt32(digits, radix: radix),
+              let scalar = Unicode.Scalar(value) else { return nil }
+        return String(Character(scalar))
     }
 }

@@ -5,10 +5,15 @@ import Foundation
 /// UserDefaults-backed settings. Read fresh on every query so changes take
 /// effect with no app restart (FR-9). API keys are NOT here; they live in
 /// the Keychain.
+///
+/// @MainActor: every consumer (views, @MainActor engines/schedulers) already
+/// reads it from the main actor; background work snapshots plain values
+/// before detaching (see `DraftEngine.runTick`).
+@MainActor
 final class SettingsStore: ObservableObject {
     static let shared = SettingsStore()
 
-    private let defaults = UserDefaults.standard
+    private let defaults: UserDefaults
 
     @Published var provider: ProviderChoice {
         didSet { defaults.set(provider.rawValue, forKey: "provider") }
@@ -101,7 +106,10 @@ final class SettingsStore: ObservableObject {
         didSet { defaults.set(draftExcludedSenders, forKey: "draftExcludedSenders") }
     }
 
-    private init() {
+    /// Production uses `.shared` (backed by `UserDefaults.standard`); tests
+    /// construct their own instance against an isolated suite.
+    init(defaults: UserDefaults = .standard) {
+        self.defaults = defaults
         provider = ProviderChoice(rawValue: defaults.string(forKey: "provider") ?? "") ?? .ollamaLocal
         localChatModel = defaults.string(forKey: "localChatModel") ?? Defaults.localChatModel
         cloudChatModel = defaults.string(forKey: "cloudChatModel") ?? Defaults.cloudChatModel
@@ -174,7 +182,9 @@ final class SettingsStore: ObservableObject {
                       mistralModel: mistralModel)
     }
 
-    static var databasePath: String {
+    // nonisolated: pure FileManager path derivation, no isolated state —
+    // read from detached background work (DraftEngine tick, Services).
+    nonisolated static var databasePath: String {
         let support = FileManager.default.urls(for: .applicationSupportDirectory,
                                                in: .userDomainMask)[0]
         let directory = support.appendingPathComponent("AskMail", isDirectory: true)
@@ -184,7 +194,7 @@ final class SettingsStore: ObservableObject {
 
     /// The separate Draft-Modus database — physically decoupled from
     /// `databasePath`'s `askmail.db` (same directory, different file).
-    static var draftsDatabasePath: String {
+    nonisolated static var draftsDatabasePath: String {
         let support = FileManager.default.urls(for: .applicationSupportDirectory,
                                                in: .userDomainMask)[0]
         let directory = support.appendingPathComponent("AskMail", isDirectory: true)

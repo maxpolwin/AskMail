@@ -58,13 +58,13 @@ public struct QueryResult: Sendable {
 public final class QueryService: @unchecked Sendable {
     private let store: SQLiteStore
     private let embedder: EmbeddingProvider
-    private let log: (String, RollingLog.LogLevel) -> Void
+    private let log: @Sendable (String, RollingLog.LogLevel) -> Void
     private let lock = NSLock()
     private var session: [SessionTurn] = []
 
     public init(store: SQLiteStore,
                 embedder: EmbeddingProvider,
-                log: @escaping (String, RollingLog.LogLevel) -> Void = { RollingLog.shared.log($0, level: $1) }) {
+                log: @escaping @Sendable (String, RollingLog.LogLevel) -> Void = { RollingLog.shared.log($0, level: $1) }) {
         self.store = store
         self.embedder = embedder
         self.log = log
@@ -233,23 +233,18 @@ public final class QueryService: @unchecked Sendable {
         let local = OllamaClient(host: settings.ollamaHost, model: settings.localModel)
         switch settings.provider {
         case .ollamaLocal:
-            return ProviderRouter(primary: local, fallback: nil, log: logSendable)
+            return ProviderRouter(primary: local, fallback: nil, log: log)
         case .ollamaCloud:
             let key = Keychain.apiKey(service: Defaults.keychainServiceOllamaCloud) ?? ""
             let cloud = OllamaClient(host: Defaults.ollamaCloudHost,
                                      model: settings.cloudModel,
                                      apiKey: key)
-            return ProviderRouter(primary: cloud, fallback: local, log: logSendable)
+            return ProviderRouter(primary: cloud, fallback: local, log: log)
         case .mistral:
             let key = Keychain.apiKey(service: Defaults.keychainServiceMistral) ?? ""
             let mistral = MistralClient(apiKey: key, model: settings.mistralModel)
-            return ProviderRouter(primary: mistral, fallback: local, log: logSendable)
+            return ProviderRouter(primary: mistral, fallback: local, log: log)
         }
-    }
-
-    private var logSendable: @Sendable (String, RollingLog.LogLevel) -> Void {
-        let log = self.log
-        return { line, level in log(line, level) }
     }
 
     /// Caps text logged at a level shipped on by default, keeping the log

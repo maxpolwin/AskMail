@@ -42,6 +42,13 @@ public final class RollingLog: @unchecked Sendable {
     private let retention: TimeInterval
     private var minLevel: LogLevel
 
+    /// Hard cap on retained entries, alongside the time window: a high-rate
+    /// failure loop (e.g. a component erroring in a tight retry cycle) must
+    /// not grow the in-memory log without bound inside the 12 h window.
+    /// Oldest entries fall off first, same as time-based pruning. Sized far
+    /// above any realistic event rate so it only bites in pathology.
+    private let maxEntries = 20_000
+
     /// Default verbosity is `.info`, not `.debug` (hardening H-23): `.debug`
     /// lines can include the full assembled prompt (retrieved mail text) and
     /// full answer text, so shipping that as the always-on default would
@@ -113,6 +120,9 @@ public final class RollingLog: @unchecked Sendable {
             entries.removeFirst(firstKept)
         } else if !entries.isEmpty {
             entries.removeAll()
+        }
+        if entries.count > maxEntries {
+            entries.removeFirst(entries.count - maxEntries)
         }
     }
 }

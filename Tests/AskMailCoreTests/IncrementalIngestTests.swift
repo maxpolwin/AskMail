@@ -58,6 +58,28 @@ final class IncrementalIngestTests: XCTestCase {
         XCTAssertEqual(try store.chunkCount(), chunksBefore, "idempotent replace, no dupes")
     }
 
+    func testEmbedCallsAreBatchedAcrossMessages() async throws {
+        let store = try SQLiteStore.inMemory()
+        let embedder = CountingEmbedder()
+        let ingestor = MailboxIngestor(store: store, embedder: embedder,
+                                       account: "test", log: { _, _ in })
+
+        // Ten single-chunk messages fit one embed batch (size 16): the run
+        // must make ~one HTTP call total, not one per email.
+        let many = (1...10).map { id in
+            EmlxFile(sourceID: Int64(id),
+                     url: Self.fixturesDirectory.appendingPathComponent("msg-0001-plain.emlx"),
+                     fingerprint: "v\(id)")
+        }
+        let summary = try await ingestor.ingestNew(many)
+
+        // The fixture repeats, so the ten upserts collapse to one message row —
+        // what matters here is the ingested count and the embed call count.
+        XCTAssertEqual(summary.ingested, 10)
+        XCTAssertEqual(embedder.calls, 1, "chunks must batch across message boundaries")
+        XCTAssertLessThanOrEqual(embedder.largestBatch, Defaults.embedBatchSize)
+    }
+
     func testAbortsEarlyWhenEmbedderUnreachable() async throws {
         let store = try SQLiteStore.inMemory()
         let embedder = UnreachableEmbedder()
@@ -122,6 +144,17 @@ final class IncrementalIngestTests: XCTestCase {
         try store.deleteAll()
         XCTAssertNil(try store.ingestedFingerprint(sourceID: 42),
                      "delete & rebuild resets ingest state so the next run rebuilds")
+    }
+}
+
+/// StubEmbedder plus call accounting, for asserting batching behavior.
+final class CountingEmbedder: EmbeddingProvider, @unchecked Sendable {
+    private(set) var calls = 0
+    private(set) var largestBatch = 0
+    func embed(_ texts: [String]) async throws -> [[Float]] {
+        calls += 1
+        largestBatch = max(largestBatch, texts.count)
+        return try await StubEmbedder().embed(texts)
     }
 }
 

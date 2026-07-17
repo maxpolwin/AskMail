@@ -147,11 +147,14 @@ private struct SourceRow: View {
 
     /// The number in the system accent (matching the bar), the rest in primary
     /// text like the answer.
+    // Attribute writes use the explicit subscript, not dynamic-member syntax
+    // (`.foregroundColor =`): the latter forms attribute key paths that trip
+    // a location-less non-Sendable warning under strict concurrency checking.
     private var styledLine: AttributedString {
         var num = AttributedString("\(number)")
-        num.foregroundColor = Theme.accent
+        num[AttributeScopes.SwiftUIAttributes.ForegroundColorAttribute.self] = Theme.accent
         var body = AttributedString("  " + sourceBody(ref))
-        body.foregroundColor = .primary
+        body[AttributeScopes.SwiftUIAttributes.ForegroundColorAttribute.self] = .primary
         return num + body
     }
 
@@ -160,7 +163,8 @@ private struct SourceRow: View {
     /// since a plain Text's `.link` attribute only ever opens via a mouse.
     private var line: AttributedString {
         var line = styledLine
-        line.link = CitationRenderer.messageURL(messageID: ref.messageID)
+        line[AttributeScopes.FoundationAttributes.LinkAttribute.self] =
+            CitationRenderer.messageURL(messageID: ref.messageID)
         return line
     }
 }
@@ -698,7 +702,9 @@ struct AskView: View {
     private var styledAnswer: AttributedString {
         var out = answerMarkdown(model.answer)
         for index in out.characters.indices where Self.superscriptDigits.contains(out.characters[index]) {
-            out[index..<out.characters.index(after: index)].foregroundColor = Theme.accent
+            // Explicit subscript, not `.foregroundColor =` — see styledLine.
+            out[index..<out.characters.index(after: index)][
+                AttributeScopes.SwiftUIAttributes.ForegroundColorAttribute.self] = Theme.accent
         }
         return out
     }
@@ -739,7 +745,7 @@ struct AskView: View {
 /// Reports the intrinsic height of the answer/sources stack so the scroll area
 /// can hug short answers and only scroll once they exceed the cap.
 private struct ContentHeightKey: PreferenceKey {
-    static var defaultValue: CGFloat = 0
+    static let defaultValue: CGFloat = 0
     static func reduce(value: inout CGFloat, nextValue: () -> CGFloat) {
         value = max(value, nextValue())
     }
@@ -749,7 +755,7 @@ private struct ContentHeightKey: PreferenceKey {
 /// the scroll area), so `AskView.scrollCap` can size the answer area to
 /// whatever room the panel actually has left rather than a fixed constant.
 private struct ChromeHeightKey: PreferenceKey {
-    static var defaultValue: CGFloat = 0
+    static let defaultValue: CGFloat = 0
     static func reduce(value: inout CGFloat, nextValue: () -> CGFloat) {
         value = max(value, nextValue())
     }

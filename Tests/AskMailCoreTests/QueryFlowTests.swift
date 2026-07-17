@@ -66,16 +66,16 @@ final class ProviderRouterTests: XCTestCase {
         let failing = StubChatProvider(name: "ollama-cloud",
                                        error: ProviderError.http(status: 401, body: "invalid key"))
         let local = StubChatProvider(name: "ollama-local", tokens: ["local ", "answer"])
-        var logged: [String] = []
-        let logLock = NSLock()
+        let loggedBox = Locked<[String]>([])
         let router = ProviderRouter(primary: failing, fallback: local) { line, _ in
-            logLock.lock(); logged.append(line); logLock.unlock()
+            loggedBox.append(line)
         }
 
         var events: [ChatEvent] = []
         for try await event in router.stream(ChatRequest(system: "s", user: "u")) {
             events.append(event)
         }
+        let logged = loggedBox.current
 
         XCTAssertEqual(events, [
             .fallback(provider: "ollama-local", error: "HTTP 401: invalid key"),
@@ -470,13 +470,13 @@ final class QueryServiceTests: XCTestCase {
     // arbitrarily long user-typed content at the default verbosity.
     func testEmptyRetrievalLogsCappedQuestionAtInfoLevel() async throws {
         let store = try SQLiteStore.inMemory()
-        var captured: [(String, RollingLog.LogLevel)] = []
+        let captured = Locked<[(String, RollingLog.LogLevel)]>([])
         let service = QueryService(store: store, embedder: StubEmbedder(),
                                    log: { line, level in captured.append((line, level)) })
         let longQuestion = String(repeating: "x", count: 500)
         _ = try await service.ask(longQuestion, settings: QuerySettings())
 
-        let infoLines = captured.filter { $0.1 == .info }
+        let infoLines = captured.current.filter { $0.1 == .info }
         XCTAssertTrue(infoLines.contains { $0.0.contains("retrieval EMPTY") })
         for (line, _) in infoLines {
             XCTAssertLessThan(line.count, longQuestion.count,
@@ -572,13 +572,13 @@ final class QueryServiceTests: XCTestCase {
         let text2 = "webinar pricing"
         try store.replaceChunks(messagePk: pk2, chunks: [(.body, text2, try await embedder.embed([text2])[0])])
 
-        var logged: [(line: String, level: RollingLog.LogLevel)] = []
-        let lock = NSLock()
+        let loggedBox = Locked<[(line: String, level: RollingLog.LogLevel)]>([])
         let service = QueryService(store: store, embedder: embedder, log: { line, level in
-            lock.lock(); logged.append((line, level)); lock.unlock()
+            loggedBox.append((line, level))
         })
         _ = try await service.retrieve(question: "invoice payment due webinar pricing", settings: QuerySettings())
 
+        let logged = loggedBox.current
         let finalLines = logged.map(\.line).filter { $0.hasPrefix("retrieval final[") }
         XCTAssertEqual(finalLines.count, 2)
         XCTAssertTrue(finalLines[0].hasPrefix("retrieval final[1]"), finalLines[0])
@@ -613,13 +613,13 @@ final class QueryServiceTests: XCTestCase {
             try store.replaceChunks(messagePk: pk, chunks: [(.body, text, try await embedder.embed([text])[0])])
         }
 
-        var logged: [String] = []
-        let lock = NSLock()
+        let loggedBox = Locked<[String]>([])
         let service = QueryService(store: store, embedder: embedder, log: { line, _ in
-            lock.lock(); logged.append(line); lock.unlock()
+            loggedBox.append(line)
         })
         _ = try await service.retrieve(question: "what emails did i get during on 2026-06-10?", settings: QuerySettings())
 
+        let logged = loggedBox.current
         let finalLines = logged.filter { $0.hasPrefix("retrieval final[") }
         XCTAssertEqual(finalLines.count, 3)
         XCTAssertTrue(finalLines.allSatisfy { $0.contains("via=date") })
@@ -634,15 +634,15 @@ final class QueryServiceTests: XCTestCase {
         let text = "invoice payment webinar pricing"
         try store.replaceChunks(messagePk: pk, chunks: [(.body, text, try await embedder.embed([text])[0])])
 
-        var logged: [String] = []
-        let lock = NSLock()
+        let loggedBox = Locked<[String]>([])
         let service = QueryService(store: store, embedder: embedder, log: { line, _ in
-            lock.lock(); logged.append(line); lock.unlock()
+            loggedBox.append(line)
         })
         var settings = QuerySettings()
         settings.relevanceFloor = 2.0  // above any possible RRF score, so everything is dropped
         let chunks = try await service.retrieve(question: "invoice payment webinar pricing", settings: settings)
 
+        let logged = loggedBox.current
         XCTAssertTrue(chunks.isEmpty)
         XCTAssertTrue(logged.contains { $0.hasPrefix("retrieval droppedByFloor=1 ") }, logged.joined(separator: "\n"))
         XCTAssertFalse(logged.contains { $0.hasPrefix("retrieval final[") })
@@ -663,15 +663,15 @@ final class QueryServiceTests: XCTestCase {
             try store.replaceChunks(messagePk: pk, chunks: [(.body, text, try await embedder.embed([text])[0])])
         }
 
-        var logged: [(line: String, level: RollingLog.LogLevel)] = []
-        let lock = NSLock()
+        let loggedBox = Locked<[(line: String, level: RollingLog.LogLevel)]>([])
         let service = QueryService(store: store, embedder: embedder, log: { line, level in
-            lock.lock(); logged.append((line, level)); lock.unlock()
+            loggedBox.append((line, level))
         })
         var settings = QuerySettings()
         settings.topK = 3
         let chunks = try await service.retrieve(question: "invoice payment due webinar pricing", settings: settings)
 
+        let logged = loggedBox.current
         XCTAssertEqual(chunks.count, 3)
         let dump = logged.map { "[\($0.level.tag)] \($0.line)" }.joined(separator: "\n")
 
@@ -705,14 +705,14 @@ final class QueryServiceTests: XCTestCase {
             try store.replaceChunks(messagePk: pk, chunks: [(.body, body, try await embedder.embed([body])[0])])
         }
 
-        var logged: [(line: String, level: RollingLog.LogLevel)] = []
-        let lock = NSLock()
+        let loggedBox = Locked<[(line: String, level: RollingLog.LogLevel)]>([])
         let service = QueryService(store: store, embedder: embedder, log: { line, level in
-            lock.lock(); logged.append((line, level)); lock.unlock()
+            loggedBox.append((line, level))
         })
         var settings = QuerySettings()
         settings.contextTokenLimit = 60  // smaller than even one ~20-repetition chunk
         _ = try await service.ask("alpha content", settings: settings)
+        let logged = loggedBox.current
         let dump = logged.map { "[\($0.level.tag)] \($0.line)" }.joined(separator: "\n")
 
         // The summary escalates to .error precisely because the budget

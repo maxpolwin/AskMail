@@ -108,7 +108,9 @@ private let SQLITE_TRANSIENT = unsafeBitCast(-1, to: sqlite3_destructor_type.sel
 ///
 /// `draft_jobs` and `style_profiles` are schema-only in Phase 1 — a later
 /// phase's `DraftEngine`/`StyleLearner` are their only writers.
-public final class DraftStore {
+/// `@unchecked Sendable`: every public method serializes on `lock`; the raw
+/// `db` handle is never exposed.
+public final class DraftStore: @unchecked Sendable {
     private let db: OpaquePointer
     private let lock = NSLock()
 

@@ -8,7 +8,11 @@ import Foundation
 /// Cmd+B, the Bold conflict). Verified against FR-1 on a German layout by
 /// using key codes, not characters. The binding can be changed at runtime
 /// from Settings via `register`.
-final class HotkeyManager {
+/// `@unchecked Sendable`: constructed and re-registered on the main thread
+/// only (AppDelegate/Settings), and the Carbon application-target callback
+/// below also fires on the main thread — the annotation exists so the
+/// C-callback boundary, which the compiler can't see through, type-checks.
+final class HotkeyManager: @unchecked Sendable {
     private var hotKeyRef: EventHotKeyRef?
     private var eventHandler: EventHandlerRef?
     private let handler: @MainActor () -> Void
@@ -24,7 +28,10 @@ final class HotkeyManager {
         InstallEventHandler(GetApplicationEventTarget(), { _, _, userData in
             guard let userData else { return noErr }
             let manager = Unmanaged<HotkeyManager>.fromOpaque(userData).takeUnretainedValue()
-            Task { @MainActor in manager.handler() }
+            // Carbon delivers application-target events on the main thread;
+            // assumeIsolated documents that instead of hopping through a Task
+            // (which would also need the non-Sendable manager to cross).
+            MainActor.assumeIsolated { manager.handler() }
             return noErr
         }, 1, &eventType, selfPointer, &eventHandler)
 

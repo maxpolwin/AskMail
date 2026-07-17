@@ -13,6 +13,8 @@ public enum Defaults {
     public static let mistralChatModel = "mistral-large-latest"
     public static let ollamaLocalHost = URL(string: "http://localhost:11434")!
     public static let ollamaCloudHost = URL(string: "https://ollama.com")!
+    public static let mistralChatEndpoint = URL(string: "https://api.mistral.ai/v1/chat/completions")!
+    public static let mistralModelsEndpoint = URL(string: "https://api.mistral.ai/v1/models")!
 
     // MARK: Retrieval (quality-critical, tune during spike B11 #3)
     /// ~512 tokens at the ~4 chars/token approximation used throughout.

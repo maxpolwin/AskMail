@@ -17,6 +17,9 @@ import Foundation
 /// address) and invokes either verb on that selection. Both verbs are
 /// therefore no-ops with an error surfaced back to Mail's Services error
 /// UI when nothing usable is selected -- see `DraftServiceMatcher.MatchError`.
+// @MainActor: AppKit invokes Services provider methods on the main thread,
+// and both entry points read main-actor state (SettingsStore.shared).
+@MainActor
 final class DraftServiceProvider: NSObject {
 
     /// "Insert draft": prepends the matching thread's latest `ready` draft

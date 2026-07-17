@@ -353,7 +353,7 @@ public struct MistralClient: ChatProvider {
 
     public init(apiKey: String,
                 model: String = Defaults.mistralChatModel,
-                endpoint: URL = URL(string: "https://api.mistral.ai/v1/chat/completions")!) {
+                endpoint: URL = Defaults.mistralChatEndpoint) {
         self.apiKey = apiKey
         self.model = model
         self.endpoint = endpoint
@@ -424,7 +424,7 @@ extension MistralClient {
     /// Model ids available to the account, for the Settings picker
     /// (`GET /v1/models`; requires the API key).
     public static func availableModels(apiKey: String,
-                                       endpoint: URL = URL(string: "https://api.mistral.ai/v1/models")!) async throws -> [String] {
+                                       endpoint: URL = Defaults.mistralModelsEndpoint) async throws -> [String] {
         try EgressPolicy.check(endpoint)
         var request = URLRequest(url: endpoint, timeoutInterval: 10)
         request.setValue("Bearer \(apiKey)", forHTTPHeaderField: "Authorization")

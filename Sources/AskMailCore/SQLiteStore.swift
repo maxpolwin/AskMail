@@ -1,3 +1,4 @@
+import Accelerate
 import Foundation
 import SQLite3
 
@@ -22,9 +23,22 @@ private let SQLITE_TRANSIENT = unsafeBitCast(-1, to: sqlite3_destructor_type.sel
 /// The spec calls for sqlite-vec; swap it in behind `vectorSearch` during
 /// spike B11 once the C extension is vendored. The brute-force scan is exact
 /// (recall-equivalent) and adequate for tens of thousands of chunks.
-public final class SQLiteStore {
+/// `@unchecked Sendable`: every public method serializes on `lock`
+/// (recursive, see `transaction`); the raw `db` handle is never exposed.
+public final class SQLiteStore: @unchecked Sendable {
     private let db: OpaquePointer
-    private let lock = NSLock()
+    /// Recursive so `transaction {}` can hold it across a body that calls the
+    /// store's own public methods (each of which takes the lock itself).
+    private let lock = NSRecursiveLock()
+    /// Nesting depth of `transaction {}` on this connection — only the
+    /// outermost call emits BEGIN/COMMIT. Guarded by `lock`.
+    private var transactionDepth = 0
+    /// Unit-normalized copies of every stored embedding, so `vectorSearch`
+    /// scores in memory instead of re-reading and re-decoding the whole
+    /// `chunks` table per query. nil = rebuild on next search; invalidated by
+    /// every chunk write. Guarded by `lock`; the array itself is
+    /// copy-on-write, so a snapshot reference is safe to score outside it.
+    private var normalizedEmbeddingCache: [(id: Int64, vector: [Float])]?
 
     public init(path: String) throws {
         var handle: OpaquePointer?
@@ -88,6 +102,27 @@ public final class SQLiteStore {
             try execute("ALTER TABLE messages ADD COLUMN body_text TEXT")
         }
         try execute("CREATE INDEX IF NOT EXISTS idx_messages_thread ON messages(thread_id)")
+        // Date-scoped retrieval (`chunks(dateRange:)`) and latest-thread
+        // lookups order/filter on date_unix; without this they scan+sort.
+        try execute("CREATE INDEX IF NOT EXISTS idx_messages_date ON messages(date_unix)")
+        // Reverse thread-linking index: one row per (referenced Message-ID,
+        // referencing message), so `candidateReferencers` is an indexed
+        // lookup instead of a full messages scan per ingested message —
+        // which made full rebuilds O(n²). Backfilled once from the existing
+        // in_reply_to/references_ids columns when the table first appears.
+        let hadRefsTable = try tableExists("message_refs")
+        try execute("""
+        CREATE TABLE IF NOT EXISTS message_refs(
+          referenced_message_id TEXT NOT NULL,
+          message_pk INTEGER NOT NULL REFERENCES messages(pk) ON DELETE CASCADE,
+          PRIMARY KEY(referenced_message_id, message_pk)
+        ) WITHOUT ROWID
+        """)
+        // Covers the cascade and the per-message refs rewrite in upsertMessage.
+        try execute("CREATE INDEX IF NOT EXISTS idx_message_refs_pk ON message_refs(message_pk)")
+        if !hadRefsTable {
+            try backfillMessageRefs()
+        }
         try execute("""
         CREATE TABLE IF NOT EXISTS chunks(
           id INTEGER PRIMARY KEY,
@@ -141,6 +176,33 @@ public final class SQLiteStore {
         """)
     }
 
+    // MARK: Transactions
+
+    /// Runs `body` as one atomic SQLite transaction (`BEGIN IMMEDIATE` …
+    /// `COMMIT`, rolled back if `body` throws), holding the store's lock
+    /// throughout so no other thread's statements can join it. Nested calls
+    /// merge into the outermost transaction. Without this, every statement
+    /// commits (and fsyncs) individually — the dominant cost of bulk ingest.
+    public func transaction<T>(_ body: () throws -> T) throws -> T {
+        lock.lock(); defer { lock.unlock() }
+        guard transactionDepth == 0 else {
+            transactionDepth += 1
+            defer { transactionDepth -= 1 }
+            return try body()
+        }
+        try execute("BEGIN IMMEDIATE")
+        transactionDepth = 1
+        defer { transactionDepth = 0 }
+        do {
+            let result = try body()
+            try execute("COMMIT")
+            return result
+        } catch {
+            try? execute("ROLLBACK")
+            throw error
+        }
+    }
+
     // MARK: Messages & chunks
 
     /// Inserts or updates a message row; returns its primary key.
@@ -157,39 +219,81 @@ public final class SQLiteStore {
                               dateUnix: Int64) throws -> Int64 {
         lock.lock(); defer { lock.unlock() }
         let referencesJoined = referencesIDs.isEmpty ? nil : referencesIDs.joined(separator: " ")
-        try run("""
-        INSERT INTO messages(message_id, account, subject, sender, original_sender,
-                             in_reply_to, references_ids, thread_id, body_text, date_unix)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-        ON CONFLICT(message_id) DO UPDATE SET
-          account = excluded.account,
-          subject = excluded.subject,
-          sender = excluded.sender,
-          original_sender = excluded.original_sender,
-          in_reply_to = excluded.in_reply_to,
-          references_ids = excluded.references_ids,
-          thread_id = excluded.thread_id,
-          body_text = excluded.body_text,
-          date_unix = excluded.date_unix
-        """) { statement in
-            bind(statement, 1, messageID)
-            bind(statement, 2, account)
-            bind(statement, 3, subject)
-            bind(statement, 4, sender)
-            bindOptional(statement, 5, originalSender)
-            bindOptional(statement, 6, inReplyTo)
-            bindOptional(statement, 7, referencesJoined)
-            bindOptional(statement, 8, threadID)
-            bindOptional(statement, 9, bodyText)
-            sqlite3_bind_int64(statement, 10, dateUnix)
+        return try transaction {
+            var pk: Int64 = 0
+            // RETURNING avoids a second pk-lookup round trip per message.
+            try query("""
+            INSERT INTO messages(message_id, account, subject, sender, original_sender,
+                                 in_reply_to, references_ids, thread_id, body_text, date_unix)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            ON CONFLICT(message_id) DO UPDATE SET
+              account = excluded.account,
+              subject = excluded.subject,
+              sender = excluded.sender,
+              original_sender = excluded.original_sender,
+              in_reply_to = excluded.in_reply_to,
+              references_ids = excluded.references_ids,
+              thread_id = excluded.thread_id,
+              body_text = excluded.body_text,
+              date_unix = excluded.date_unix
+            RETURNING pk
+            """) { statement in
+                bind(statement, 1, messageID)
+                bind(statement, 2, account)
+                bind(statement, 3, subject)
+                bind(statement, 4, sender)
+                bindOptional(statement, 5, originalSender)
+                bindOptional(statement, 6, inReplyTo)
+                bindOptional(statement, 7, referencesJoined)
+                bindOptional(statement, 8, threadID)
+                bindOptional(statement, 9, bodyText)
+                sqlite3_bind_int64(statement, 10, dateUnix)
+            } row: { statement in
+                pk = sqlite3_column_int64(statement, 0)
+            }
+            // Keep the reverse index in step with the columns it mirrors.
+            try run("DELETE FROM message_refs WHERE message_pk = ?") { statement in
+                sqlite3_bind_int64(statement, 1, pk)
+            }
+            try insertMessageRefs(pk: pk, inReplyTo: inReplyTo, referencesIDs: referencesIDs)
+            return pk
         }
-        var pk: Int64 = 0
-        try query("SELECT pk FROM messages WHERE message_id = ?") { statement in
-            bind(statement, 1, messageID)
+    }
+
+    /// One `message_refs` row per distinct referenced Message-ID (the same id
+    /// may appear in both In-Reply-To and References). Caller holds the lock.
+    private func insertMessageRefs(pk: Int64, inReplyTo: String?, referencesIDs: [String]) throws {
+        var referenced = Set<String>()
+        if let inReplyTo, !inReplyTo.isEmpty { referenced.insert(inReplyTo) }
+        for id in referencesIDs where !id.isEmpty { referenced.insert(id) }
+        for id in referenced {
+            try run("INSERT OR IGNORE INTO message_refs(referenced_message_id, message_pk) VALUES (?, ?)") { statement in
+                bind(statement, 1, id)
+                sqlite3_bind_int64(statement, 2, pk)
+            }
+        }
+    }
+
+    /// Populates `message_refs` from the pre-existing space-joined columns the
+    /// first time the table is created (one-time migration step).
+    private func backfillMessageRefs() throws {
+        var rows: [(pk: Int64, inReplyTo: String?, references: String?)] = []
+        try query("""
+        SELECT pk, in_reply_to, references_ids FROM messages
+        WHERE in_reply_to IS NOT NULL OR references_ids IS NOT NULL
+        """) { _ in
         } row: { statement in
-            pk = sqlite3_column_int64(statement, 0)
+            rows.append((sqlite3_column_int64(statement, 0),
+                         nullableColumn(statement, 1),
+                         nullableColumn(statement, 2)))
         }
-        return pk
+        guard !rows.isEmpty else { return }
+        try transaction {
+            for row in rows {
+                let references = row.references?.split(separator: " ").map(String.init) ?? []
+                try insertMessageRefs(pk: row.pk, inReplyTo: row.inReplyTo, referencesIDs: references)
+            }
+        }
     }
 
     // MARK: Thread linking (Draft-Modus §3)
@@ -210,24 +314,24 @@ public final class SQLiteStore {
 
     /// Messages that already point at `referencingMessageID` via their own
     /// `in_reply_to`/`references_ids` — used to detect out-of-order arrival
-    /// (a reply ingested before its parent). Small scan filtered in Swift: the
-    /// Inbox/Sent-only scope keeps volumes modest, and exact-token containment
-    /// against a space-joined column isn't reliably expressible as SQL `LIKE`.
+    /// (a reply ingested before its parent). An indexed lookup against the
+    /// `message_refs` reverse table (one row per referenced Message-ID), so
+    /// resolving a thread costs O(matches) instead of a full messages scan —
+    /// the scan made full-mailbox rebuilds quadratic.
     public func candidateReferencers(referencingMessageID: String) throws -> [(pk: Int64, threadID: String, inReplyTo: String?, referencesIDs: [String])] {
         lock.lock(); defer { lock.unlock() }
         var results: [(Int64, String, String?, [String])] = []
         try query("""
-        SELECT pk, thread_id, in_reply_to, references_ids FROM messages
-        WHERE thread_id IS NOT NULL AND (in_reply_to IS NOT NULL OR references_ids IS NOT NULL)
-        """) { _ in
+        SELECT m.pk, m.thread_id, m.in_reply_to, m.references_ids
+        FROM message_refs r JOIN messages m ON m.pk = r.message_pk
+        WHERE r.referenced_message_id = ? AND m.thread_id IS NOT NULL
+        """) { statement in
+            bind(statement, 1, referencingMessageID)
         } row: { statement in
-            let threadID = nullableColumn(statement, 1)
-            guard let threadID else { return }
+            guard let threadID = nullableColumn(statement, 1) else { return }
             let inReplyTo = nullableColumn(statement, 2)
             let references = nullableColumn(statement, 3)?.split(separator: " ").map(String.init) ?? []
-            if inReplyTo == referencingMessageID || references.contains(referencingMessageID) {
-                results.append((sqlite3_column_int64(statement, 0), threadID, inReplyTo, references))
-            }
+            results.append((sqlite3_column_int64(statement, 0), threadID, inReplyTo, references))
         }
         return results
     }
@@ -303,21 +407,26 @@ public final class SQLiteStore {
     public func replaceChunks(messagePk: Int64,
                               chunks: [(source: ChunkSource, text: String, embedding: [Float]?)]) throws {
         lock.lock(); defer { lock.unlock() }
-        try run("DELETE FROM chunks WHERE message_pk = ?") { statement in
-            sqlite3_bind_int64(statement, 1, messagePk)
-        }
-        for chunk in chunks {
-            try run("INSERT INTO chunks(message_pk, source, text, embedding) VALUES (?, ?, ?, ?)") { statement in
+        normalizedEmbeddingCache = nil
+        // One transaction for the delete + all inserts: a single commit
+        // instead of one per chunk, and no crash window with partial chunks.
+        try transaction {
+            try run("DELETE FROM chunks WHERE message_pk = ?") { statement in
                 sqlite3_bind_int64(statement, 1, messagePk)
-                bind(statement, 2, chunk.source.rawValue)
-                bind(statement, 3, chunk.text)
-                if let embedding = chunk.embedding {
-                    let data = Self.blob(from: embedding)
-                    data.withUnsafeBytes { buffer in
-                        _ = sqlite3_bind_blob(statement, 4, buffer.baseAddress, Int32(buffer.count), SQLITE_TRANSIENT)
+            }
+            for chunk in chunks {
+                try run("INSERT INTO chunks(message_pk, source, text, embedding) VALUES (?, ?, ?, ?)") { statement in
+                    sqlite3_bind_int64(statement, 1, messagePk)
+                    bind(statement, 2, chunk.source.rawValue)
+                    bind(statement, 3, chunk.text)
+                    if let embedding = chunk.embedding {
+                        let data = Self.blob(from: embedding)
+                        data.withUnsafeBytes { buffer in
+                            _ = sqlite3_bind_blob(statement, 4, buffer.baseAddress, Int32(buffer.count), SQLITE_TRANSIENT)
+                        }
+                    } else {
+                        sqlite3_bind_null(statement, 4)
                     }
-                } else {
-                    sqlite3_bind_null(statement, 4)
                 }
             }
         }
@@ -351,32 +460,43 @@ public final class SQLiteStore {
 
     /// Vector search, best first. Brute-force exact cosine over all stored
     /// embeddings; see the class note about the sqlite-vec swap-in point.
+    ///
+    /// Scores against `normalizedEmbeddingCache` — unit vectors decoded once
+    /// per index change, not re-read from SQLite per query — so cosine
+    /// collapses to an Accelerate dot product. The cache holds the same bytes
+    /// the old per-query scan allocated transiently (~4 bytes × dims per
+    /// chunk, ~28 MB at 6.8k × 1024-dim), traded deliberately for resident
+    /// memory to make every ask/draft retrieval fast.
     public func vectorSearch(_ embedding: [Float], topN: Int = Defaults.vectorTopN) throws -> [Int64] {
-        // Copy (id, embedding) rows out under the lock, then decode/score
-        // after releasing it — the brute-force cosine scan no longer
-        // serializes concurrent ingest for its whole duration (lock-hold
-        // reduction hardening). ~20 MB transient at 6.8k chunks is acceptable.
-        let rows: [(id: Int64, data: Data)] = try {
+        let queryVector = Self.normalized(embedding)
+        guard !queryVector.isEmpty else { return [] }
+
+        // Build or snapshot the cache under the lock; score outside it so the
+        // scan doesn't serialize concurrent ingest (lock-hold reduction).
+        let cache: [(id: Int64, vector: [Float])] = try {
             lock.lock(); defer { lock.unlock() }
-            var rows: [(id: Int64, data: Data)] = []
+            if let cached = normalizedEmbeddingCache { return cached }
+            var rows: [(id: Int64, vector: [Float])] = []
             try query("SELECT id, embedding FROM chunks WHERE embedding IS NOT NULL") { _ in
             } row: { statement in
                 let byteCount = Int(sqlite3_column_bytes(statement, 1))
                 guard byteCount > 0, let pointer = sqlite3_column_blob(statement, 1) else { return }
-                rows.append((sqlite3_column_int64(statement, 0), Data(bytes: pointer, count: byteCount)))
+                let data = Data(bytes: pointer, count: byteCount)
+                rows.append((sqlite3_column_int64(statement, 0), Self.normalized(Self.floats(from: data))))
             }
+            normalizedEmbeddingCache = rows
             return rows
         }()
 
-        var scored: [(id: Int64, score: Double)] = []
+        var scored: [(id: Int64, score: Float)] = []
+        scored.reserveCapacity(cache.count)
         var mismatched = 0
-        for row in rows {
-            let stored = Self.floats(from: row.data)
-            guard stored.count == embedding.count else {
+        for entry in cache {
+            guard entry.vector.count == queryVector.count else {
                 mismatched += 1
                 continue
             }
-            scored.append((row.id, Self.cosine(embedding, stored)))
+            scored.append((entry.id, vDSP.dot(entry.vector, queryVector)))
         }
         if mismatched > 0 {
             // With the single-model stamp enforced at ingest, this guard is an
@@ -387,6 +507,16 @@ public final class SQLiteStore {
                 level: .error)
         }
         return scored.sorted { $0.score > $1.score }.prefix(topN).map(\.id)
+    }
+
+    /// The vector scaled to unit length, so cosine similarity against another
+    /// unit vector is a plain dot product. A zero vector is returned as-is
+    /// (its dot with anything is 0, matching `cosine`'s zero-denominator case).
+    static func normalized(_ vector: [Float]) -> [Float] {
+        guard !vector.isEmpty else { return vector }
+        let norm = vDSP.sumOfSquares(vector).squareRoot()
+        guard norm > 0 else { return vector }
+        return vDSP.divide(vector, norm)
     }
 
     /// Loads chunks with their email metadata, preserving the input id order
@@ -582,7 +712,8 @@ public final class SQLiteStore {
     /// manual run rebuilds from scratch.
     public func deleteAll() throws {
         lock.lock(); defer { lock.unlock() }
-        try run("DELETE FROM messages") { _ in }   // chunks cascade, FTS via trigger
+        normalizedEmbeddingCache = nil
+        try run("DELETE FROM messages") { _ in }   // chunks + message_refs cascade, FTS via trigger
         try run("DELETE FROM ingest_failures") { _ in }
         try run("DELETE FROM meta") { _ in }
         try run("DELETE FROM ingest_state") { _ in }
@@ -695,6 +826,16 @@ public final class SQLiteStore {
     private func nullableColumn(_ statement: OpaquePointer, _ index: Int32) -> String? {
         guard let text = sqlite3_column_text(statement, index) else { return nil }
         return String(cString: text)
+    }
+
+    private func tableExists(_ name: String) throws -> Bool {
+        var exists = false
+        try query("SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = ?") { statement in
+            bind(statement, 1, name)
+        } row: { _ in
+            exists = true
+        }
+        return exists
     }
 
     private func columnExists(_ table: String, _ column: String) throws -> Bool {

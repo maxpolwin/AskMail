@@ -49,12 +49,21 @@ public enum EmlxParser {
         } catch {
             throw EmlxParseError.malformed("unreadable file \(fileURL.lastPathComponent): \(error)")
         }
-        return try parse(data: data, maxAttachmentBytes: maxAttachmentBytes, maxMimeDepth: maxMimeDepth)
+        return try parse(data: data, maxEmlxBytes: maxEmlxBytes,
+                         maxAttachmentBytes: maxAttachmentBytes, maxMimeDepth: maxMimeDepth)
     }
 
     public static func parse(data: Data,
+                              maxEmlxBytes: Int = Defaults.maxEmlxBytes,
                               maxAttachmentBytes: Int = Defaults.maxAttachmentBytes,
                               maxMimeDepth: Int = Defaults.maxMimeDepth) throws -> ParsedEmail {
+        // H-7, enforced on every entry point: the caller may have read the
+        // bytes itself (the XPC service receives them over the wire), so the
+        // total-size cap must hold here too, not only on the file path.
+        guard data.count <= maxEmlxBytes else {
+            throw EmlxParseError.malformed(
+                "input is \(data.count) bytes, exceeds max \(maxEmlxBytes)")
+        }
         guard let newline = data.firstIndex(of: UInt8(ascii: "\n")) else {
             throw EmlxParseError.malformed("no byte-count line")
         }
