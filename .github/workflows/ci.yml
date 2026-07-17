@@ -1,0 +1,45 @@
+# Build + test gate. Tests run headless with no Ollama and no real mailbox
+# (see README "Testing"), so a stock macOS runner is all this needs.
+#
+# -warnings-as-errors holds the strict-concurrency baseline (Package.swift
+# enables StrictConcurrency on every target; the tree builds warning-free).
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  test:
+    runs-on: macos-15
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Swift version
+        run: swift --version
+
+      - name: Build (warnings as errors)
+        run: swift build -Xswiftc -warnings-as-errors
+
+      - name: Test
+        run: swift test
+
+  hooks:
+    runs-on: macos-15
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Run pre-commit hooks
+        # socket-scan needs the Socket CLI + auth, which the runner doesn't
+        # have; every other hook (gitleaks, large-files, private-keys,
+        # whitespace) runs as configured.
+        run: |
+          pipx install pre-commit
+          SKIP=socket-scan pre-commit run --all-files --show-diff-on-failure
