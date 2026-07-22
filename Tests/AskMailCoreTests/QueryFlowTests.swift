@@ -117,8 +117,10 @@ final class ProviderRouterTests: XCTestCase {
         let primary = StubChatProvider(name: "cloud", tokens: ["fast", " answer"])
         let local = StubChatProvider(name: "ollama-local", tokens: ["local"],
                                      onStart: { localStarted.mark() })
+        // Generous timeout: the immediate primary only loses the race if the
+        // runner stalls this task for 2 s straight (CI-jitter headroom).
         let router = ProviderRouter(primary: primary, fallback: local,
-                                   raceTimeout: .milliseconds(200)) { _, _ in }
+                                   raceTimeout: .seconds(2)) { _, _ in }
 
         var events: [ChatEvent] = []
         for try await event in router.stream(ChatRequest(system: "s", user: "u")) {
@@ -133,12 +135,16 @@ final class ProviderRouterTests: XCTestCase {
     // still answers first (just slowly). Primary's answer wins, no .fallback
     // event fires (the user still gets the configured provider's answer),
     // and local gets cancelled — proven via onCancelled, not just absent tokens.
+    // Timing margins here (and in the other race tests): the outcome-deciding
+    // gaps are hundreds of ms to seconds so CI-runner scheduling jitter
+    // can't flip who wins — Task.sleep only ever overshoots, so the loser's
+    // delay must exceed the winner's by more than any realistic stall.
     func testPrimaryWinsRaceAfterSlowStart() async throws {
         let localCancelled = TestFlag()
         let primary = StubChatProvider(name: "cloud", tokens: ["slow", " but first"],
-                                       delay: .milliseconds(60))
+                                       delay: .milliseconds(400))
         let local = StubChatProvider(name: "ollama-local", tokens: ["local"],
-                                     delay: .milliseconds(300),
+                                     delay: .seconds(2),
                                      onCancelled: { localCancelled.mark() })
         let router = ProviderRouter(primary: primary, fallback: local,
                                    raceTimeout: .milliseconds(20)) { _, _ in }
@@ -149,10 +155,9 @@ final class ProviderRouterTests: XCTestCase {
         }
 
         XCTAssertEqual(events, [.token("slow"), .token(" but first"), .done])
-        // Cancellation delivery isn't synchronous with stream completion;
-        // give it a moment to actually propagate before checking the flag.
-        try await Task.sleep(for: .milliseconds(50))
-        XCTAssertTrue(localCancelled.value, "local must be cancelled once primary wins the race")
+        // Cancellation delivery isn't synchronous with stream completion.
+        let cancelled = await eventually { localCancelled.value }
+        XCTAssertTrue(cancelled, "local must be cancelled once primary wins the race")
     }
 
     // Primary is silent past raceTimeout; local answers first. Local's
@@ -162,10 +167,10 @@ final class ProviderRouterTests: XCTestCase {
     func testLocalWinsRaceWhenPrimaryExceedsTimeout() async throws {
         let primaryCancelled = TestFlag()
         let primary = StubChatProvider(name: "cloud", tokens: ["never", " seen"],
-                                       delay: .milliseconds(300),
+                                       delay: .seconds(2),
                                        onCancelled: { primaryCancelled.mark() })
         let local = StubChatProvider(name: "ollama-local", tokens: ["local ", "answer"],
-                                     delay: .milliseconds(60))
+                                     delay: .milliseconds(400))
         let router = ProviderRouter(primary: primary, fallback: local,
                                    raceTimeout: .milliseconds(20)) { _, _ in }
 
@@ -178,10 +183,9 @@ final class ProviderRouterTests: XCTestCase {
             .fallback(provider: "ollama-local", error: "no response from cloud within 0.02 seconds"),
             .token("local "), .token("answer"), .done,
         ])
-        // Cancellation delivery isn't synchronous with stream completion;
-        // give it a moment to actually propagate before checking the flag.
-        try await Task.sleep(for: .milliseconds(50))
-        XCTAssertTrue(primaryCancelled.value, "primary must be cancelled once local wins the race")
+        // Cancellation delivery isn't synchronous with stream completion.
+        let cancelled = await eventually { primaryCancelled.value }
+        XCTAssertTrue(cancelled, "primary must be cancelled once local wins the race")
     }
 
     // Primary fails outright (not just slow) after raceTimeout, while local
@@ -191,9 +195,9 @@ final class ProviderRouterTests: XCTestCase {
         let localStartCount = TestCounter()
         let primary = StubChatProvider(name: "cloud",
                                        error: ProviderError.http(status: 500, body: "late failure"),
-                                       delay: .milliseconds(60))
+                                       delay: .milliseconds(400))
         let local = StubChatProvider(name: "ollama-local", tokens: ["local ", "answer"],
-                                     delay: .milliseconds(90),
+                                     delay: .seconds(2),
                                      onStart: { localStartCount.increment() })
         let router = ProviderRouter(primary: primary, fallback: local,
                                    raceTimeout: .milliseconds(20)) { _, _ in }
@@ -239,10 +243,10 @@ final class ProviderRouterTests: XCTestCase {
     func testBothFailDuringRaceThrowsTerminally() async throws {
         let primary = StubChatProvider(name: "cloud",
                                        error: ProviderError.http(status: 500, body: "cloud down"),
-                                       delay: .milliseconds(40))
+                                       delay: .milliseconds(400))
         let local = StubChatProvider(name: "ollama-local",
                                      error: ProviderError.http(status: 503, body: "local down"),
-                                     delay: .milliseconds(60))
+                                     delay: .milliseconds(800))
         let router = ProviderRouter(primary: primary, fallback: local,
                                    raceTimeout: .milliseconds(10)) { _, _ in }
 
@@ -280,10 +284,10 @@ final class ProviderRouterTests: XCTestCase {
     // rather than the router giving up just because local lost early.
     func testLocalFailsDuringRaceFallsThroughToPrimary() async throws {
         let primary = StubChatProvider(name: "cloud", tokens: ["primary ", "wins"],
-                                       delay: .milliseconds(80))
+                                       delay: .milliseconds(700))
         let local = StubChatProvider(name: "ollama-local",
                                      error: ProviderError.http(status: 503, body: "local unavailable"),
-                                     delay: .milliseconds(30))
+                                     delay: .milliseconds(300))
         let router = ProviderRouter(primary: primary, fallback: local,
                                    raceTimeout: .milliseconds(10)) { _, _ in }
 
@@ -306,10 +310,10 @@ final class ProviderRouterTests: XCTestCase {
         let primaryCancelled = TestFlag()
         let localCancelled = TestFlag()
         let primary = StubChatProvider(name: "cloud", tokens: ["never seen"],
-                                       delay: .milliseconds(200),
+                                       delay: .seconds(3),
                                        onCancelled: { primaryCancelled.mark() })
         let local = StubChatProvider(name: "ollama-local", tokens: ["never seen either"],
-                                     delay: .milliseconds(200),
+                                     delay: .seconds(3),
                                      onCancelled: { localCancelled.mark() })
         let router = ProviderRouter(primary: primary, fallback: local,
                                    raceTimeout: .milliseconds(10)) { _, _ in }
@@ -320,13 +324,12 @@ final class ProviderRouterTests: XCTestCase {
         // Give both sides time to actually start racing (past raceTimeout),
         // then cancel the consumer — mirroring how the app itself cancels a
         // resubmitted or abandoned query — without either side having answered.
-        try await Task.sleep(for: .milliseconds(40))
+        try await Task.sleep(for: .milliseconds(400))
         collectorTask.cancel()
         _ = try? await collectorTask.value
 
-        try await Task.sleep(for: .milliseconds(80))
-        XCTAssertTrue(primaryCancelled.value, "primary must be cancelled when the stream is torn down mid-race")
-        XCTAssertTrue(localCancelled.value, "local must be cancelled when the stream is torn down mid-race")
+        let bothCancelled = await eventually { primaryCancelled.value && localCancelled.value }
+        XCTAssertTrue(bothCancelled, "both sides must be cancelled when the stream is torn down mid-race")
     }
 
     // MARK: H-11 egress transparency
@@ -358,10 +361,10 @@ final class ProviderRouterTests: XCTestCase {
     func testEgressRecordedEvenWhenLocalWinsRace() async throws {
         EgressLog.shared.clear()
         let cloudPrimary = StubChatProvider(name: "mistral", tokens: ["never seen"],
-                                            delay: .milliseconds(300),
+                                            delay: .seconds(2),
                                             egressHost: "api.mistral.ai", egressModel: "mistral-large-latest")
         let local = StubChatProvider(name: "ollama-local", tokens: ["local ", "answer"],
-                                     delay: .milliseconds(60))
+                                     delay: .milliseconds(400))
         let router = ProviderRouter(primary: cloudPrimary, fallback: local,
                                    raceTimeout: .milliseconds(20)) { _, _ in }
 

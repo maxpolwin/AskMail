@@ -30,3 +30,17 @@ extension Locked where Value: RangeReplaceableCollection {
         with { $0.append(element) }
     }
 }
+
+/// Polls `condition` until it's true or `timeout` elapses. Replaces the
+/// fixed-sleep-then-assert pattern for asynchronous side effects (task
+/// cancellation delivery, detached completion): a fixed grace period flakes
+/// on loaded CI runners, while polling passes the moment the effect lands
+/// and only costs the full timeout when the test would fail anyway.
+func eventually(timeout: TimeInterval = 3.0, _ condition: @escaping () -> Bool) async -> Bool {
+    let deadline = Date().addingTimeInterval(timeout)
+    while Date() < deadline {
+        if condition() { return true }
+        try? await Task.sleep(for: .milliseconds(20))
+    }
+    return condition()
+}

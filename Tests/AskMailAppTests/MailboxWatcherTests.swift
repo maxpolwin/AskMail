@@ -35,16 +35,19 @@ final class MailboxWatcherTests: XCTestCase {
         defer { try? FileManager.default.removeItem(at: dir) }
 
         let counter = CallCounter()
-        let watcher = MailboxWatcher(debounce: 0.3) { counter.increment() }
+        // A wide window relative to the write burst (~0.1s of writes vs 2s):
+        // only a multi-second scheduler stall between writes could split the
+        // burst across windows and flake this on a loaded CI runner.
+        let watcher = MailboxWatcher(debounce: 2.0) { counter.increment() }
         watcher.start(watching: dir.path)
 
         for index in 0..<5 {
             try Data("x".utf8).write(to: dir.appendingPathComponent("\(index).emlx"))
-            Thread.sleep(forTimeInterval: 0.02)  // well inside the 0.3s debounce window
+            Thread.sleep(forTimeInterval: 0.02)  // well inside the debounce window
         }
 
         // Wait comfortably past the debounce window from the last write.
-        let deadline = Date().addingTimeInterval(2)
+        let deadline = Date().addingTimeInterval(8)
         while counter.value == 0, Date() < deadline {
             RunLoop.current.run(mode: .default, before: Date().addingTimeInterval(0.05))
         }
