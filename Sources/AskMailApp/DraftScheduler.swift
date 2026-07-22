@@ -21,7 +21,7 @@ final class DraftScheduler {
 
     private var timer: Timer?
     private var watcher: MailboxWatcher?
-    private var wakeTask: Task<Void, Never>?
+    private var wakeObserver: AnyCancellable?
     private var enabledObserver: AnyCancellable?
 
     func start() {
@@ -51,11 +51,15 @@ final class DraftScheduler {
             self.watcher = watcher
         }
 
-        wakeTask = Task { @MainActor in
-            for await _ in NSWorkspace.shared.notificationCenter.notifications(named: NSWorkspace.didWakeNotification) {
-                await DraftEngine.shared.runTick(.wake)
+        // Combine, not `notifications(named:)`: iterating that async sequence
+        // sends non-Sendable `Notification` values across isolation, which
+        // older strict-concurrency compilers (CI's toolchain) reject. The
+        // notification itself is never needed, only the wake signal.
+        wakeObserver = NSWorkspace.shared.notificationCenter
+            .publisher(for: NSWorkspace.didWakeNotification)
+            .sink { _ in
+                Task { @MainActor in await DraftEngine.shared.runTick(.wake) }
             }
-        }
 
         RollingLog.shared.log("draft scheduler armed: 2-min floor + mailbox watch + wake catch-up", level: .info)
         // Catch up now in case Draft-Modus was just enabled, or the Mac was
@@ -68,8 +72,8 @@ final class DraftScheduler {
         timer = nil
         watcher?.stop()
         watcher = nil
-        wakeTask?.cancel()
-        wakeTask = nil
+        wakeObserver?.cancel()
+        wakeObserver = nil
         RollingLog.shared.log("draft scheduler disarmed (Draft-Modus turned off)", level: .info)
     }
 }

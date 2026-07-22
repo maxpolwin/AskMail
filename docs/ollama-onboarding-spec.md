@@ -274,7 +274,7 @@ first-run is a guided checklist.
    `MailboxIngestor`/`Vectorizer` at run start or first upsert). Get the
    authoritative `<dimension>` from `OllamaControl.showModel(id).embeddingLength`
    (fall back to the registry value).
-2. **Mismatch → consented rebuild.** 
+2. **Mismatch → consented rebuild.**
    - In the embedding **picker's** `onChange`, if the store is non-empty and the
      new model ≠ the stamp, present a `.confirmationDialog` (reuse the
      `showRebuildConfirmation` idiom): *"Switching to <model> re-indexes your N
