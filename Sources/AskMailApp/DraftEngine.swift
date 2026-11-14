@@ -98,7 +98,7 @@ final class DraftEngine: ObservableObject {
         // duration. `settings`/`SettingsStore` aren't actor-isolated
         // themselves, but reading them only from the main actor keeps this
         // tick's inputs consistent with the guards just above.
-        let embeddingModel = settings.embeddingModel
+        let embedding = settings.embeddingConfig
         let localChatModel = settings.localChatModel
         let accountStorageKey = settings.accountStorageKey
         let accountEmail = settings.accountEmail
@@ -132,9 +132,9 @@ final class DraftEngine: ObservableObject {
                     accountDirectory: directory, fileIndex: fileIndex)
                 if !toIngest.isEmpty {
                     let ingestor = MailboxIngestor(store: askStore,
-                                                   embedder: OllamaEmbedder(model: embeddingModel),
+                                                   embedder: EmbedderFactory.make(embedding),
                                                    account: accountStorageKey,
-                                                   embeddingStamp: await Vectorizer.embeddingStamp(for: embeddingModel),
+                                                   embeddingStamp: await Vectorizer.embeddingStamp(for: embedding),
                                                    parser: parser)
                     _ = try await ingestor.ingestNew(toIngest)
                 }
@@ -150,7 +150,7 @@ final class DraftEngine: ObservableObject {
 
                 await DraftJobProcessor.draftEligibleJobs(
                     draftStore: draftStore, askStore: askStore, chatProvider: localLLM,
-                    embedder: OllamaEmbedder(model: embeddingModel), concurrency: concurrency,
+                    embedder: EmbedderFactory.make(embedding), concurrency: concurrency,
                     accountEmail: accountEmail)
 
                 // Phase 3: local-only, same as everything else in this tick

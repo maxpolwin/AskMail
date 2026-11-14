@@ -15,8 +15,25 @@ selected one.
   outbound request; embeddings are structurally loopback-only; every cloud
   send is recorded at request initiation in a session egress log, shown live
   in the panel and audited in Settings.
+- A local OpenAI-compatible model server (LM Studio, llama.cpp, MLX, vLLM)
+  may be chosen as the chat provider. Its URL is user-editable, so it is
+  validated, not trusted: loopback hosts only (`LocalServerEndpoint`), the
+  allowlist is unchanged, requests use a session that refuses redirects and
+  system proxies, and the response stream is size-capped. It records no
+  egress event because nothing leaves the device.
+- Embeddings may come from Ollama or from a local OpenAI-compatible server
+  (`OpenAIEmbedder`), chosen separately from the chat provider. Both are
+  loopback-only (`checkLoopbackOnly` on every request), the server path uses
+  the same redirect- and proxy-free session, caps and strictly validates the
+  response (count, indices, one width, finite numbers), and `EmbedderFactory`
+  is the only place an embedder is built, so Ask, indexing and Draft-Modus
+  always use the same one. An index survives a runtime switch only if a
+  canary check (fixed probe strings, never mail text) shows the new embedder
+  produces matching vectors; otherwise ingest refuses and a re-index is
+  required, so incompatible vectors are never mixed.
 - Draft-Modus is local-only by construction: drafting, classification, and
-  style learning never use the configured cloud provider, and a draft is
+  style learning never use the configured cloud provider (its chat stays on
+  local Ollama; its embedder is the index's loopback-only embedder), and a draft is
   never auto-sent or inserted into Mail.
 - v1 has no PII redaction and no sender exclusion (both land in v1.1). This
   is an accepted, documented gap. Do not point v1 at a mailbox with highly

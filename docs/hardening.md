@@ -34,7 +34,7 @@ check passes. Verification commands are collected in the
 | H-7 Size caps before read/decode | ✅ Implemented. `Defaults.maxEmlxBytes` checked via `FileManager` attributes before `Data(contentsOf:)`; attachment cap enforced on the *encoded* size (`Mime.Part.maxDecodedByteEstimate`) before decode, with the old post-decode check kept as defense in depth. Tests in ParserHardeningTests. |
 | H-8 MIME recursion depth limit | ✅ Implemented. `Defaults.maxMimeDepth` (32) threaded through `EmlxParser.collectContent`; exceeding it fails the parse closed. |
 | H-9 Bounded regex passes | ✅ Implemented. `Defaults.maxHtmlBytes` (2 MB, UTF-8-boundary-safe truncation) before any pass; all `HtmlText` regexes precompiled; two real catastrophic-backtracking shapes found empirically and fixed (see HtmlText.swift's pattern notes). |
-| H-10 Egress allowlist | ✅ Implemented. [EgressPolicy.swift](../Sources/AskMailCore/EgressPolicy.swift) — loopback + `ollama.com` + `api.mistral.ai`, checked before any bytes on every URLSession call in Providers.swift/OllamaControl.swift; `OllamaEmbedder` is loopback-only structurally. |
+| H-10 Egress allowlist | ✅ Implemented. [EgressPolicy.swift](../Sources/AskMailCore/EgressPolicy.swift) — loopback + `ollama.com` + `api.mistral.ai`, checked before any bytes on every URLSession call in Providers.swift/OllamaControl.swift; `OllamaEmbedder` and `OpenAIEmbedder` (local OpenAI-compatible embeddings, response size-capped and strictly validated) are loopback-only structurally. The local OpenAI-compatible provider ([LocalServer.swift](../Sources/AskMailCore/LocalServer.swift), [OpenAIChatClient.swift](../Sources/AskMailCore/OpenAIChatClient.swift)) adds no host: its user-editable URL is validated to loopback, re-checked with `checkLoopbackOnly` per request, sent through a redirect-refusing, proxy-free session, and its SSE stream is byte-capped. |
 | H-11 Egress transparency | ✅ Implemented. `EgressLog` records at request *initiation* (survives a local race win); `ChatEvent.egress` drives a live indicator in the ask panel; Settings shows the session's auditable "what left, when, to whom" table. |
 | H-13 Redact provider error bodies | ✅ Implemented. `ProviderError.description` caps `.http` bodies at 300 chars, single-line; the raw body stays in the associated value for programmatic use only. |
 | H-14 Answer-link scheme allowlist | ✅ Implemented. [LinkPolicy.swift](../Sources/AskMailCore/LinkPolicy.swift) + wiring in AskView.swift; 8 unit tests. |
@@ -44,7 +44,7 @@ check passes. Verification commands are collected in the
 | H-20 Verify the Ollama binary | ✅ Implemented. [BinarySignature.swift](../Sources/AskMailCore/BinarySignature.swift) (`anchor apple` or Developer ID) gates `OllamaEngine.startOllama()`; refusal is actionable and unit-tested. |
 | H-23 Default log level | ✅ Implemented. `SettingsStore`/`RollingLog` both default to `.info`; the one `.info`-level line with user text is now capped at 200 chars. |
 | H-24 Draft-Modus DB lockdown | ✅ Implemented. `drafts.db` gets the identical `FileHardening.lockDown` treatment as `askmail.db` at every open — see [Draft-Modus hardening posture](#draft-modus-dm-hardening-posture). |
-| H-25 Draft-Modus stays local-only on every path | ✅ Implemented. Scheduled ticks, on-demand Services "Regenerate", and style learning all construct their `ChatProvider`/`EmbeddingProvider` from `Defaults.ollamaLocalHost` directly — never the user's configured (possibly cloud) Q&A provider. |
+| H-25 Draft-Modus stays local-only on every path | ✅ Implemented. Scheduled ticks, on-demand Services "Regenerate", and style learning construct their `ChatProvider` from `Defaults.ollamaLocalHost` directly — never the user's configured (possibly cloud) Q&A provider. Their `EmbeddingProvider` comes from `EmbedderFactory` (the same loopback-only embedder that built the index, since Draft retrieval queries that index), never from the Q&A provider setting. |
 | H-26 Services-menu surface adds no new grant | ✅ Implemented. Phase 4's `DraftServiceProvider` is a standard, unprivileged `NSServices` provider reading/writing only local SQLite state; no FDA/Automation/Accessibility prompt at any point. |
 | H-12, H-17, H-19, H-21, H-22 | Open. TLS pinning (H-12), code-signature Keychain ACL (H-17), FDA onboarding copy (H-19), CI-enforced scans (H-21), provenance doc (H-22). |
 
@@ -393,6 +393,8 @@ ls -le "$HOME/Library/Application Support/AskMail/drafts.db"   # expect 0600
 grep -n "OllamaClient(host: Defaults.ollamaLocalHost" \
   Sources/AskMailApp/DraftEngine.swift Sources/AskMailApp/DraftServiceProvider.swift
 # both must match; neither file should read settings.provider before constructing a chat provider
+grep -n "EmbedderFactory.make" Sources/AskMailApp/DraftEngine.swift Sources/AskMailApp/DraftServiceProvider.swift
+# the embedder is the index's (loopback-only) one, built from settings.embeddingConfig
 
 # Draft-Modus Services menu (H-26) — with a drafted, ready thread open in Mail:
 # select the quoted reply text, Mail ▸ Services shows "AskMail: Insert Draft" /

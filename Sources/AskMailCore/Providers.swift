@@ -58,6 +58,16 @@ public enum ProviderError: Error, CustomStringConvertible {
     /// Hardening H-10: `host` isn't on `EgressPolicy`'s compiled-in
     /// allowlist. Thrown before any request is sent.
     case egressBlocked(host: String)
+    /// The local-server URL setting failed validation (or no model is chosen);
+    /// the associated text is the actionable reason.
+    case invalidEndpoint(String)
+    /// A local OpenAI-compatible server rejected the prompt as larger than the
+    /// context window it loaded the model with.
+    case localContextExceeded
+    /// A local OpenAI-compatible server doesn't have (or hasn't loaded) the
+    /// requested model — the equivalent of `ollamaModelMissing` for servers
+    /// that don't use `ollama pull`.
+    case serverModelMissing(model: String)
 
     /// Hardening H-13: cloud 4xx bodies often echo the submitted prompt
     /// (i.e. mail content, via the assembled prompt in QueryService), and
@@ -79,7 +89,39 @@ public enum ProviderError: Error, CustomStringConvertible {
                 + "Download it in Settings \u{2192} Local engine, then try again."
         case .egressBlocked(let host):
             return "blocked outbound request to \u{201C}\(host)\u{201D}: not on the egress allowlist"
+        case .invalidEndpoint(let reason):
+            return "invalid local server setting: \(reason)"
+        case .localContextExceeded:
+            return "The local server\u{2019}s context window is too small for this question. "
+                + "Raise the model\u{2019}s context length in your server (LM Studio: model "
+                + "load settings; llama-server: -c), or lower \u{201C}Context tokens\u{201D} in Settings."
+        case .serverModelMissing(let model):
+            return "The local server doesn\u{2019}t have the model \u{201C}\(model)\u{201D} loaded. "
+                + "Load it in the server app (LM Studio: Developer \u{2192} load model; llama-server: start it with that model), then try again."
         }
+    }
+
+    /// Whether an OpenAI-compatible server's 4xx body says the requested
+    /// model isn't available. Wording differs per server, so match stable
+    /// fragments, and require the word "model" so unrelated 404s (a wrong
+    /// path, an endpoint the server doesn't implement) stay plain HTTP errors.
+    public static func isServerModelMissing(status: Int, body: String) -> Bool {
+        guard status == 400 || status == 404 else { return false }
+        let lowered = body.lowercased()
+        guard lowered.contains("model") else { return false }
+        return ["not found", "not loaded", "does not exist", "unknown model",
+                "no such model", "invalid model", "failed to load"].contains { lowered.contains($0) }
+    }
+
+    /// Whether an OpenAI-compatible server's 4xx body says the prompt exceeded
+    /// the loaded context window. Wording differs per server (llama.cpp:
+    /// `exceed_context_size_error`; LM Studio / vLLM: "context length" /
+    /// "context_length_exceeded"), so match the stable fragments.
+    public static func isContextOverflow(status: Int, body: String) -> Bool {
+        guard status == 400 || status == 413 else { return false }
+        let lowered = body.lowercased()
+        return ["exceed_context_size", "context_length_exceeded", "context length",
+                "context window", "n_ctx", "maximum context"].contains { lowered.contains($0) }
     }
 
     /// Collapses newlines (so one log line stays one line) and caps at 300
@@ -225,6 +267,9 @@ public struct OllamaClient: ChatProvider {
                         return bytes
                     }
 
+                    // Reasoning models may emit <think>…</think> inline; keep
+                    // that out of the answer (and out of its citations).
+                    var filter = ThinkTagFilter()
                     for try await line in bytes.lines {
                         guard let data = line.data(using: .utf8),
                               let json = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else {
@@ -232,10 +277,13 @@ public struct OllamaClient: ChatProvider {
                         }
                         if let message = json["message"] as? [String: Any],
                            let content = message["content"] as? String, !content.isEmpty {
-                            continuation.yield(content)
+                            let visible = filter.process(content)
+                            if !visible.isEmpty { continuation.yield(visible) }
                         }
                         if json["done"] as? Bool == true { break }
                     }
+                    let tail = filter.finish()
+                    if !tail.isEmpty { continuation.yield(tail) }
                     continuation.finish()
                 } catch ProviderError.http(let status, let body)
                             where apiKey == nil

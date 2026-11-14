@@ -12,6 +12,11 @@ public enum IngestError: Error, CustomStringConvertible {
     /// (non-empty) index. An incremental run would mix incomparable vectors,
     /// so it is refused; only a full rebuild may proceed.
     case embeddingModelMismatch(configured: String, indexed: String)
+    /// The configured embedder produces vectors that don't match the index's
+    /// canary baseline even though the model name is the same (e.g. the server
+    /// loaded a different model, or the model was re-quantized). Same remedy:
+    /// only a re-embed can proceed.
+    case embeddingIncompatible(reason: String)
 
     public var description: String {
         switch self {
@@ -21,6 +26,8 @@ public enum IngestError: Error, CustomStringConvertible {
             return "embedding model \u{201C}\(model)\u{201D} not installed (run: ollama pull \(model))"
         case .embeddingModelMismatch(let configured, let indexed):
             return "index built with \u{201C}\(indexed)\u{201D} but \u{201C}\(configured)\u{201D} is configured \u{2014} rebuild required"
+        case .embeddingIncompatible(let reason):
+            return "the embedding backend no longer matches the index (\(reason)) \u{2014} rebuild required"
         }
     }
 }
@@ -140,20 +147,14 @@ public final class MailboxIngestor {
     @discardableResult
     public func ingestNew(_ files: [EmlxFile],
                           progress: (@Sendable (IngestProgress) -> Void)? = nil) async throws -> IngestSummary {
-        // Refuse to mix models before touching anything: an incremental run
-        // over an index built by a different embedding model would interleave
-        // incomparable vectors (Phase 3 invariant). A matching or fresh index
-        // is (re-)stamped so the check holds for the next run too.
+        // Refuse to mix incompatible vectors before touching anything: an
+        // incremental run over an index built by a different embedding model
+        // would interleave incomparable vectors. Compatibility is judged by
+        // evidence (the canary probes), not by model name, so the same model
+        // behind another runtime keeps its index. A matching or fresh index is
+        // (re-)stamped so the check holds for the next run too.
         if let embeddingStamp {
-            let existing = try store.embeddingStamp()
-            if EmbeddingStamp.requiresRebuild(configuredModel: embeddingStamp.model,
-                                              stamp: existing,
-                                              chunkCount: try store.chunkCount()) {
-                log("ingest refused: index stamped \(existing!.encoded), configured \(embeddingStamp.encoded)", .error)
-                throw IngestError.embeddingModelMismatch(configured: embeddingStamp.model,
-                                                         indexed: existing!.model)
-            }
-            try store.setEmbeddingStamp(embeddingStamp)
+            try await verifyEmbeddingCompatibility(embeddingStamp)
         }
 
         var ingested = 0
@@ -260,11 +261,69 @@ public final class MailboxIngestor {
                              empty: empty, newWatermark: newWatermark)
     }
 
+    /// Gate for `ingestNew`: proves the configured embedder can extend the
+    /// existing index, adopts or baselines it, and stamps it. Setup failures
+    /// are mapped to the same actionable errors a mid-run embed would give.
+    private func verifyEmbeddingCompatibility(_ stamp: EmbeddingStamp) async throws {
+        let existing = try store.embeddingStamp()
+        let chunkCount = try store.chunkCount()
+
+        // Cheap early refusal, no embedding needed: both widths are known and
+        // differ, so the vectors can never be compared.
+        if chunkCount > 0, let existing,
+           let indexedWidth = existing.dimensions, let configuredWidth = stamp.dimensions,
+           indexedWidth != configuredWidth {
+            log("ingest refused: index stamped \(existing.encoded), configured \(stamp.encoded)", .error)
+            throw IngestError.embeddingModelMismatch(configured: stamp.model, indexed: existing.model)
+        }
+
+        do {
+            switch await EmbeddingCanary.assess(store: store, embedder: embedder) {
+            case .emptyIndex:
+                try await EmbeddingCanary.recordBaseline(store: store, embedder: embedder)
+            case .compatible(let similarity):
+                log("embedding canary compatible (min similarity \(String(format: "%.3f", similarity)))", .debug)
+            case .noBaseline:
+                // Index from before canaries existed. The same model name is
+                // adopted (it was built by what is configured, as the legacy
+                // stamp path always assumed); a different name can't be proven
+                // compatible, so it is refused as before.
+                if let existing, !OllamaStatus.modelName(existing.model, matches: stamp.model) {
+                    log("ingest refused: index stamped \(existing.encoded), configured \(stamp.encoded)", .error)
+                    throw IngestError.embeddingModelMismatch(configured: stamp.model, indexed: existing.model)
+                }
+                try await EmbeddingCanary.recordBaseline(store: store, embedder: embedder)
+            case .incompatible(let reason):
+                log("ingest refused: embedding canary incompatible: \(reason)", .error)
+                if let existing, !OllamaStatus.modelName(existing.model, matches: stamp.model) {
+                    throw IngestError.embeddingModelMismatch(configured: stamp.model, indexed: existing.model)
+                }
+                throw IngestError.embeddingIncompatible(reason: reason)
+            case .unverifiable(let error):
+                throw error
+            }
+        } catch let error as IngestError {
+            throw error
+        } catch {
+            if let model = Self.missingEmbeddingModel(error) {
+                log("ingest aborted: embedding model \(model) not available", .error)
+                throw IngestError.embeddingModelMissing(model: model)
+            }
+            if Self.isConnectionError(error) {
+                log("ingest aborted: embedding backend unreachable during compatibility check", .error)
+                throw IngestError.embedderUnreachable
+            }
+            throw error
+        }
+        try store.setEmbeddingStamp(stamp)
+    }
+
     /// The model name if this error is Ollama's "model not installed" 404 — a
     /// global misconfiguration that dooms every message, distinct from a
     /// per-message parse/embed failure.
     static func missingEmbeddingModel(_ error: Error) -> String? {
         if case ProviderError.ollamaModelMissing(let model) = error { return model }
+        if case ProviderError.serverModelMissing(let model) = error { return model }
         return nil
     }
 

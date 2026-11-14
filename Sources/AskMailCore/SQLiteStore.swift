@@ -723,6 +723,22 @@ public final class SQLiteStore: @unchecked Sendable {
         try count("SELECT COUNT(*) FROM messages")
     }
 
+    /// Average chunk length in characters over a sample of the index (nil when
+    /// empty). Sampled, not a full scan: the Settings budget panel only needs
+    /// an estimate, and a scan would read every chunk of a large mailbox.
+    public func averageChunkChars(sample: Int = 2000) throws -> Int? {
+        lock.lock(); defer { lock.unlock() }
+        var average: Double?
+        try query("SELECT AVG(LENGTH(text)) FROM (SELECT text FROM chunks LIMIT ?)") { statement in
+            sqlite3_bind_int(statement, 1, Int32(max(1, sample)))
+        } row: { statement in
+            if sqlite3_column_type(statement, 0) != SQLITE_NULL {
+                average = sqlite3_column_double(statement, 0)
+            }
+        }
+        return average.map { Int($0.rounded()) }
+    }
+
     public func chunkCount() throws -> Int {
         try count("SELECT COUNT(*) FROM chunks")
     }

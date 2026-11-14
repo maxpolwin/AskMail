@@ -85,14 +85,14 @@ final class Vectorizer: ObservableObject {
         let storageKey = settings.accountStorageKey
         do {
             let store = try SQLiteStore(path: SettingsStore.databasePath)
-            let model = settings.embeddingModel
+            let embedding = settings.embeddingConfig
             // XPCEmailParser (hardening H-6): all untrusted .emlx/MIME/HTML/PDF
             // parsing runs in the sandboxed parser XPC service, never in this
             // (FDA-holding) process.
             let ingestor = MailboxIngestor(store: store,
-                                           embedder: OllamaEmbedder(model: model),
+                                           embedder: EmbedderFactory.make(embedding),
                                            account: storageKey,
-                                           embeddingStamp: await Self.embeddingStamp(for: model),
+                                           embeddingStamp: await Self.embeddingStamp(for: embedding),
                                            parser: XPCEmailParser())
             let files = EmlxLocator.scan(accountDirectory: directory)
                 .sorted { $0.sourceID < $1.sourceID }
@@ -118,17 +118,10 @@ final class Vectorizer: ObservableObject {
         } catch let error as IngestError {
             // A setup problem stopped the run before it could fail every message.
             // Already-done work is saved; the rest resumes once it's fixed.
-            switch error {
-            case .embedderUnreachable:
-                RollingLog.shared.log("\(trigger.rawValue) vectorize stopped: Ollama unreachable")
-                status = "Stopped: Ollama isn\u{2019}t running. Start it (\u{2018}ollama serve\u{2019}), then Vectorize now \u{2014} it resumes where it left off."
-            case .embeddingModelMissing(let model):
-                RollingLog.shared.log("\(trigger.rawValue) vectorize stopped: embedding model \(model) not installed", level: .error)
-                status = "Stopped: the embedding model \u{2018}\(model)\u{2019} isn\u{2019}t installed. Download it above in Local engine, then Vectorize now \u{2014} it resumes where it left off."
-            case .embeddingModelMismatch(let configured, let indexed):
-                RollingLog.shared.log("\(trigger.rawValue) vectorize refused: index stamped \(indexed), configured \(configured)", level: .error)
-                status = "Stopped: this index was built with \u{2018}\(indexed)\u{2019} but \u{2018}\(configured)\u{2019} is selected. Use Delete & rebuild to re-index, or switch the embedding model back."
-            }
+            let report = Self.report(for: error, backend: settings.embeddingBackend,
+                                     resume: "Vectorize now")
+            RollingLog.shared.log("\(trigger.rawValue) vectorize \(report.log)", level: .error)
+            status = report.status
             return nil
         } catch {
             RollingLog.shared.log("\(trigger.rawValue) vectorize failed: \(error)", level: .error)
@@ -168,14 +161,14 @@ final class Vectorizer: ObservableObject {
                 status = "No failed emails to retry."
                 return nil
             }
-            let model = settings.embeddingModel
+            let embedding = settings.embeddingConfig
             // XPCEmailParser (hardening H-6): all untrusted .emlx/MIME/HTML/PDF
             // parsing runs in the sandboxed parser XPC service, never in this
             // (FDA-holding) process.
             let ingestor = MailboxIngestor(store: store,
-                                           embedder: OllamaEmbedder(model: model),
+                                           embedder: EmbedderFactory.make(embedding),
                                            account: storageKey,
-                                           embeddingStamp: await Self.embeddingStamp(for: model),
+                                           embeddingStamp: await Self.embeddingStamp(for: embedding),
                                            parser: XPCEmailParser())
             let files = EmlxLocator.scan(accountDirectory: directory)
                 .filter { failedIDs.contains($0.sourceID) }
@@ -192,17 +185,9 @@ final class Vectorizer: ObservableObject {
                 "retry vectorize done: \(summary.ingested) now ok, \(summary.failed) still failing", level: .info)
             return summary
         } catch let error as IngestError {
-            switch error {
-            case .embedderUnreachable:
-                RollingLog.shared.log("retry vectorize stopped: Ollama unreachable", level: .error)
-                status = "Stopped: Ollama isn\u{2019}t running. Start it (\u{2018}ollama serve\u{2019}), then retry \u{2014} it resumes where it left off."
-            case .embeddingModelMissing(let model):
-                RollingLog.shared.log("retry vectorize stopped: embedding model \(model) not installed", level: .error)
-                status = "Stopped: the embedding model \u{2018}\(model)\u{2019} isn\u{2019}t installed. Download it above in Local engine, then retry \u{2014} it resumes where it left off."
-            case .embeddingModelMismatch(let configured, let indexed):
-                RollingLog.shared.log("retry vectorize refused: index stamped \(indexed), configured \(configured)", level: .error)
-                status = "Stopped: this index was built with \u{2018}\(indexed)\u{2019} but \u{2018}\(configured)\u{2019} is selected. Use Delete & rebuild to re-index, or switch the embedding model back."
-            }
+            let report = Self.report(for: error, backend: settings.embeddingBackend, resume: "retry")
+            RollingLog.shared.log("retry vectorize \(report.log)", level: .error)
+            status = report.status
             return nil
         } catch {
             RollingLog.shared.log("retry vectorize failed: \(error)", level: .error)
@@ -211,18 +196,52 @@ final class Vectorizer: ObservableObject {
         }
     }
 
-    /// The stamp for a run: the configured model plus its authoritative
-    /// dimension from `/api/show`, falling back to the registry when the
-    /// daemon can't answer (the stamp still guards by model name alone).
-    static func embeddingStamp(for model: String) async -> EmbeddingStamp {
-        if let info = try? await OllamaControl().showModel(model),
-           let dimension = info.embeddingLength {
-            return EmbeddingStamp(model: model, dimensions: dimension)
+    /// What a setup error means for the user, per backend: the log line and
+    /// the Settings status. `resume` names the button that continues the run.
+    static func report(for error: IngestError, backend: EmbeddingBackend,
+                       resume: String) -> (log: String, status: String) {
+        let backendName = backend == .ollama ? "Ollama" : "The local embedding server"
+        switch error {
+        case .embedderUnreachable:
+            let fix = backend == .ollama
+                ? "Start it (\u{2018}ollama serve\u{2019})"
+                : "Start your model server"
+            return ("stopped: \(backendName) unreachable",
+                    "Stopped: \(backendName) isn\u{2019}t running. \(fix), then \(resume) \u{2014} it resumes where it left off.")
+        case .embeddingModelMissing(let model):
+            let fix = backend == .ollama
+                ? "Download it above in Local engine"
+                : "Load it in your model server"
+            return ("stopped: embedding model \(model) not available",
+                    "Stopped: the embedding model \u{2018}\(model)\u{2019} isn\u{2019}t available. \(fix), then \(resume) \u{2014} it resumes where it left off.")
+        case .embeddingModelMismatch(let configured, let indexed):
+            return ("refused: index stamped \(indexed), configured \(configured)",
+                    "Stopped: this index was built with \u{2018}\(indexed)\u{2019} but \u{2018}\(configured)\u{2019} is selected and its vectors don\u{2019}t match. Use Delete & rebuild to re-index, or switch the embedding model back.")
+        case .embeddingIncompatible(let reason):
+            return ("refused: embedding backend incompatible with index: \(reason)",
+                    "Stopped: the selected embedding backend no longer matches this index (\(reason)). Use Delete & rebuild to re-index, or switch back to the model that built it.")
         }
-        let fallback = ModelCatalog.embedding
-            .first { OllamaStatus.modelName($0.id, matches: model) }?
-            .embeddingDimensions
-        return EmbeddingStamp(model: model, dimensions: fallback)
+    }
+
+    /// The stamp for a run: the configured model plus its dimension. Ollama
+    /// reports it via `/api/show` (registry fallback); a local server has no
+    /// such endpoint, so one probe embedding gives the width. The stamp still
+    /// guards by model name alone when neither source knew it.
+    static func embeddingStamp(for config: EmbeddingConfig) async -> EmbeddingStamp {
+        switch config.backend {
+        case .ollama:
+            if let info = try? await OllamaControl().showModel(config.model),
+               let dimension = info.embeddingLength {
+                return EmbeddingStamp(model: config.model, dimensions: dimension)
+            }
+            let fallback = ModelCatalog.embedding
+                .first { OllamaStatus.modelName($0.id, matches: config.model) }?
+                .embeddingDimensions
+            return EmbeddingStamp(model: config.model, dimensions: fallback)
+        case .localServer:
+            let width = await EmbeddingCanary.probeDimensions(embedder: EmbedderFactory.make(config))
+            return EmbeddingStamp(model: config.model, dimensions: width)
+        }
     }
 }
 

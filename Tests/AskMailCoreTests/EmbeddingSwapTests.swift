@@ -169,20 +169,20 @@ final class EmbeddingSwapTests: XCTestCase {
             fullDiskAccess: true, accountPicked: true,
             ollamaStatus: .runningModelMissing(model: "nomic-embed-text"),
             hasVectorized: false)
-        XCTAssertTrue(modelMissing.ollamaRunning)
+        XCTAssertTrue(modelMissing.backendRunning)
         XCTAssertFalse(modelMissing.embeddingModelInstalled)
         XCTAssertFalse(modelMissing.allDone)
 
         // Unknown status (first check in flight) claims nothing.
         let checking = OnboardingChecklist.derive(fullDiskAccess: false, accountPicked: false,
                                                   ollamaStatus: nil, hasVectorized: false)
-        XCTAssertFalse(checking.ollamaRunning)
+        XCTAssertFalse(checking.backendRunning)
         XCTAssertFalse(checking.allDone)
 
         for status in [OllamaStatus.notInstalled, .stopped] {
             let derived = OnboardingChecklist.derive(fullDiskAccess: true, accountPicked: true,
                                                      ollamaStatus: status, hasVectorized: true)
-            XCTAssertFalse(derived.ollamaRunning)
+            XCTAssertFalse(derived.backendRunning)
             XCTAssertFalse(derived.embeddingModelInstalled)
         }
     }

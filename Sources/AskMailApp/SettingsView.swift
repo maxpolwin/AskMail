@@ -18,6 +18,9 @@ struct SettingsView: View {
     @State private var showExportLogsWarning = false
     @State private var logsStatus = ""
     @State private var showRebuildConfirmation = false
+    /// Sampled average chunk length of the index, for the budget panel's
+    /// tokens-per-excerpt figure; nil until measured or when the index is empty.
+    @State private var averageChunkChars: Int?
     @State private var statusMessage = ""
     @State private var launchAtLogin = LoginItem.isEnabled
     @State private var accounts: [MailAccount] = []
@@ -30,10 +33,10 @@ struct SettingsView: View {
     @State private var showResetStyleConfirmation = false
     /// The in-flight embedding-model change awaiting rebuild consent; `from`
     /// restores the picker on cancel.
-    @State private var embeddingSwap: (from: String, to: String, messages: Int)?
+    @State private var embeddingSwap: (from: EmbeddingConfig, to: EmbeddingConfig, messages: Int)?
     /// Suppresses the swap prompt while the picker is being programmatically
     /// reverted after a cancel.
-    @State private var revertingEmbeddingModel = false
+    @State private var revertingEmbeddingConfig = false
     /// Scales with System Settings ▸ Accessibility ▸ Display ▸ Text Size
     /// instead of staying pinned at 12pt.
     @ScaledMetric(relativeTo: .caption) private var systemPromptFontSize: CGFloat = 12
@@ -44,8 +47,20 @@ struct SettingsView: View {
         OnboardingChecklist.derive(
             fullDiskAccess: accessStatus != .permissionDenied,
             accountPicked: !settings.accountID.isEmpty,
-            ollamaStatus: engine.status,
+            embeddingBackend: embeddingReadiness,
             hasVectorized: settings.lastVectorized != nil)
+    }
+
+    /// Readiness of whichever runtime serves embeddings (not the chat provider).
+    private var embeddingReadiness: EmbeddingBackendReadiness {
+        switch settings.embeddingBackend {
+        case .ollama:
+            return engine.status.map(EmbeddingBackendReadiness.ollama) ?? .checking
+        case .localServer:
+            guard let reachable = remote.embeddingServerReachable else { return .checking }
+            return .server(reachable: reachable,
+                           modelAvailable: remote.embeddingServerModels.contains(settings.embeddingModel))
+        }
     }
 
     var body: some View {
@@ -60,22 +75,36 @@ struct SettingsView: View {
                             .font(.caption)
                             .foregroundStyle(.secondary)
                     }
-                    checklistRow(checklist.ollamaRunning, "Ollama running") {
-                        switch engine.status {
-                        case .notInstalled:
-                            Button("Download Ollama\u{2026}") { engine.openDownloadPage() }
-                        case .stopped:
-                            Button("Start") { Task { await engine.startOllama() } }
-                        default:
-                            EmptyView()
+                    checklistRow(checklist.backendRunning,
+                                 settings.embeddingBackend == .ollama
+                                     ? "Ollama running" : "Embedding server running") {
+                        switch settings.embeddingBackend {
+                        case .ollama:
+                            switch engine.status {
+                            case .notInstalled:
+                                Button("Download Ollama\u{2026}") { engine.openDownloadPage() }
+                            case .stopped:
+                                Button("Start") { Task { await engine.startOllama() } }
+                            default:
+                                EmptyView()
+                            }
+                        case .localServer:
+                            Button("Check again") { refreshEmbeddingServer() }
+                                .disabled(embeddingServerURLProblem != nil)
                         }
                     }
                     checklistRow(checklist.embeddingModelInstalled, "Embedding model installed") {
-                        if checklist.ollamaRunning {
-                            Button("Download") {
-                                Task { await engine.pull(model: settings.embeddingModel) }
+                        if checklist.backendRunning {
+                            if settings.embeddingBackend == .ollama {
+                                Button("Download") {
+                                    Task { await engine.pull(model: settings.embeddingModel) }
+                                }
+                                .disabled(engine.pullingModel != nil)
+                            } else {
+                                Text("Load it in your server")
+                                    .font(.caption)
+                                    .foregroundStyle(.secondary)
                             }
-                            .disabled(engine.pullingModel != nil)
                         }
                     }
                     checklistRow(checklist.firstVectorizationDone, "First vectorization") {
@@ -257,6 +286,11 @@ struct SettingsView: View {
                           systemImage: "lock")
                         .font(.caption)
                         .foregroundStyle(.secondary)
+                } else if settings.provider == .localServer {
+                    Label("Answers come from a model server running on this Mac (loopback only). Your email never leaves this Mac.",
+                          systemImage: "lock")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
                 } else {
                     Label("Indexing and search stay on this Mac, but \(providerName) writes the answer \u{2014} so your question and the matching email excerpts are sent to it. Choose Ollama (local) to keep everything on-device.",
                           systemImage: "arrow.up.forward")
@@ -270,6 +304,7 @@ struct SettingsView: View {
                     Text("Ollama (local)").tag(ProviderChoice.ollamaLocal)
                     Text("Ollama Cloud").tag(ProviderChoice.ollamaCloud)
                     Text("Mistral API").tag(ProviderChoice.mistral)
+                    Text("Local server (LM Studio, llama.cpp, MLX\u{2026})").tag(ProviderChoice.localServer)
                 }
 
                 switch settings.provider {
@@ -301,44 +336,39 @@ struct SettingsView: View {
                     Text("The local model answers when the cloud provider fails.")
                         .font(.caption)
                         .foregroundStyle(.secondary)
+                case .localServer:
+                    localServerControls
                 }
 
-                modelPicker(title: "Embedding model", kind: .embedding,
-                            selection: $settings.embeddingModel)
-                Text("Used to index and search your email. Switching asks to re-index \u{2014} vectors from different models can\u{2019}t be mixed.")
+                Picker("Embedding backend", selection: $settings.embeddingBackend) {
+                    Text("Ollama").tag(EmbeddingBackend.ollama)
+                    Text("Local server (LM Studio, llama.cpp\u{2026})").tag(EmbeddingBackend.localServer)
+                }
+                switch settings.embeddingBackend {
+                case .ollama:
+                    modelPicker(title: "Embedding model", kind: .embedding,
+                                selection: $settings.embeddingModel)
+                case .localServer:
+                    embeddingServerControls
+                }
+                Text("Used to index and search your email. Switching runtime or model keeps your index when the new one produces matching vectors (AskMail checks this); otherwise it asks to re-index.")
                     .font(.caption)
                     .foregroundStyle(.secondary)
 
-                Stepper("Context tokens: \(settings.contextTokenLimit)",
-                        value: $settings.contextTokenLimit, in: 512...16384, step: 512)
-                Text("How much of your email is read into each answer. Higher considers more sources, but is slower and uses more memory.")
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
-                Stepper("Answer tokens: \(settings.answerTokenLimit)",
-                        value: $settings.answerTokenLimit, in: 100...4000, step: 100)
-                Text("The maximum length of a reply.")
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
-
-                // Guidance: what good values are for this Mac + model, with a
-                // one-click apply. Only nudge when the current values differ.
                 let advice = tokenAdvice
-                Text(advice.rationale)
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
-                if settings.contextTokenLimit != advice.contextTokens
-                    || settings.answerTokenLimit != advice.answerTokens {
-                    HStack(spacing: 8) {
-                        Text("Recommended: \(advice.contextTokens) context, \(advice.answerTokens) answer.")
-                            .font(.caption)
-                            .foregroundStyle(.secondary)
-                        Button("Use recommended") {
-                            settings.contextTokenLimit = advice.contextTokens
-                            settings.answerTokenLimit = advice.answerTokens
-                        }
-                        .font(.caption)
-                    }
-                }
+                ContextBudgetView(
+                    excerpts: $settings.excerptsPerAnswer,
+                    context: $settings.contextTokenLimit,
+                    answer: $settings.answerTokenLimit,
+                    tokensPerExcerpt: ContextBudget.tokensPerExcerpt(averageChunkChars: averageChunkChars),
+                    isMeasured: averageChunkChars != nil,
+                    availableMemoryGB: settings.provider == .ollamaLocal
+                        ? TokenAdvisor.availableMemoryGB(modelSizeMB: selectedLocalModelSizeMB,
+                                                         physicalMemoryBytes: ProcessInfo.processInfo.physicalMemory)
+                        : nil,
+                    serverWindowTokens: settings.provider == .localServer ? remote.contextLength : nil,
+                    recommended: advice,
+                    rationale: advice.rationale)
 
                 // Folded away by default — the relevance bar is self-explanatory;
                 // this is only for those who want to know what it measures.
@@ -455,13 +485,15 @@ struct SettingsView: View {
             vectorizer.refreshFailedCount()
             draftEngine.refreshCounts()
             Task { await engine.refresh() }
-            Task { await remote.refresh(for: settings.provider) }
+            refreshRemoteModels()
+            measureChunkSize()
         }
-        .onChange(of: settings.provider) { _, provider in
-            Task { await remote.refresh(for: provider) }
+        .onChange(of: settings.provider) { _, _ in
+            refreshRemoteModels()
         }
-        .onChange(of: settings.embeddingModel) { old, new in
-            handleEmbeddingModelChange(from: old, to: new)
+        .onChange(of: settings.embeddingConfig) { old, new in
+            handleEmbeddingConfigChange(from: old, to: new)
+            if new.backend == .localServer { refreshEmbeddingServer() }
         }
         .confirmationDialog(
             "Switching the embedding model re-indexes your mail",
@@ -470,7 +502,7 @@ struct SettingsView: View {
                    role: .destructive) { confirmEmbeddingSwap() }
             Button("Cancel", role: .cancel) { cancelEmbeddingSwap() }
         } message: {
-            Text("Vectors from different models can\u{2019}t be mixed. Switching to \u{2018}\(embeddingSwap?.to ?? "")\u{2019} deletes the current index and re-embeds everything, which can take a while. Cancel keeps \u{2018}\(embeddingSwap?.from ?? "")\u{2019}.")
+            Text("Vectors from different models can\u{2019}t be mixed. \u{2018}\(embeddingSwap?.to.label ?? "")\u{2019} produces vectors that don\u{2019}t match the current index, so switching deletes it and re-embeds everything, which can take a while. Cancel keeps \u{2018}\(embeddingSwap?.from.label ?? "")\u{2019}.")
         }
         .alert("Export debug logs?", isPresented: $showExportLogsWarning) {
             Button("Export\u{2026}", role: .destructive) { exportLogs() }
@@ -637,7 +669,10 @@ struct SettingsView: View {
     /// this Mac's memory. Recomputed on each render so it tracks provider/model
     /// changes; ProcessInfo lookups are cheap.
     private var tokenAdvice: TokenAdvisor.Recommendation {
-        TokenAdvisor.recommend(
+        if settings.provider == .localServer {
+            return TokenAdvisor.recommendLocalServer(serverContextTokens: remote.contextLength)
+        }
+        return TokenAdvisor.recommend(
             isLocal: settings.provider == .ollamaLocal,
             modelSizeMB: selectedLocalModelSizeMB,
             physicalMemoryBytes: ProcessInfo.processInfo.physicalMemory)
@@ -729,7 +764,122 @@ struct SettingsView: View {
         case .ollamaLocal: return "Ollama (local)"
         case .ollamaCloud: return "Ollama Cloud"
         case .mistral: return "Mistral"
+        case .localServer: return "Local server"
         }
+    }
+
+    /// Refreshes the remote/local-server model list for the current provider.
+    private func refreshRemoteModels() {
+        let provider = settings.provider
+        let url = settings.localServerURL
+        Task {
+            await remote.refresh(for: provider, localServerURL: url)
+            // First use: adopt the server's first model so the picker is never blank.
+            if provider == .localServer, settings.localServerModel.isEmpty,
+               let first = remote.localServerModels.first {
+                settings.localServerModel = first
+            }
+        }
+    }
+
+    /// Why the URL field's current text can't be used, or nil when it can.
+    private var localServerURLProblem: String? {
+        Self.urlProblem(settings.localServerURL)
+    }
+
+    private static func urlProblem(_ raw: String) -> String? {
+        do {
+            _ = try LocalServerEndpoint.validate(raw)
+            return nil
+        } catch let error as ProviderError {
+            if case .egressBlocked = error {
+                return "Only this Mac is allowed (localhost or 127.0.0.1). Remote servers are blocked so your email can\u{2019}t leave the device."
+            }
+            if case .invalidEndpoint(let reason) = error { return reason }
+            return "\(error)"
+        } catch {
+            return "\(error)"
+        }
+    }
+
+    @ViewBuilder
+    private var localServerControls: some View {
+        TextField("Server URL", text: $settings.localServerURL)
+            .autocorrectionDisabled()
+            .onSubmit { refreshRemoteModels() }
+        if let problem = localServerURLProblem {
+            Label(problem, systemImage: "exclamationmark.triangle.fill")
+                .font(.caption)
+                .foregroundStyle(.orange)
+        }
+        HStack {
+            Button("Refresh models") { refreshRemoteModels() }
+                .disabled(localServerURLProblem != nil)
+            Button(remote.isDetecting ? "Looking\u{2026}" : "Detect servers") {
+                Task { await remote.detectLocalServers() }
+            }
+            .disabled(remote.isDetecting)
+        }
+        ForEach(remote.detectedServers) { info in
+            Button {
+                settings.localServerURL = info.baseURL.absoluteString
+                settings.localServerModel = info.models.first ?? ""
+                refreshRemoteModels()
+            } label: {
+                Label("\(info.label) \u{00B7} \(info.baseURL.absoluteString) \u{00B7} \(info.models.count) model(s)",
+                      systemImage: "server.rack")
+            }
+        }
+        if remote.localServerModels.isEmpty {
+            if !remote.localServerNote.isEmpty {
+                Text(remote.localServerNote).font(.caption).foregroundStyle(.secondary)
+            }
+        } else {
+            remotePicker(title: "Model",
+                         models: remote.localServerModels.map { InstalledModel(name: $0, sizeBytes: 0) },
+                         selection: $settings.localServerModel,
+                         note: remote.localServerNote)
+        }
+        let needed = TokenAdvisor.minimumServerContext(context: settings.contextTokenLimit,
+                                                       answer: settings.answerTokenLimit)
+        Text("Set the model\u{2019}s context length in your server to at least \(needed) tokens"
+             + (remote.contextLength.map { " (it reports \($0))." } ?? "."))
+            .font(.caption)
+            .foregroundStyle(.secondary)
+        Text("Indexing uses the embedding backend below. Draft-Modus replies still use Ollama.")
+            .font(.caption)
+            .foregroundStyle(.secondary)
+    }
+
+    /// Why the embedding server URL can't be used, or nil when it can.
+    private var embeddingServerURLProblem: String? {
+        Self.urlProblem(settings.embeddingServerURL)
+    }
+
+    private func refreshEmbeddingServer() {
+        let url = settings.embeddingServerURL
+        Task { await remote.refreshEmbeddingServer(url: url) }
+    }
+
+    @ViewBuilder
+    private var embeddingServerControls: some View {
+        TextField("Embedding server URL", text: $settings.embeddingServerURL)
+            .autocorrectionDisabled()
+            .onSubmit { refreshEmbeddingServer() }
+        if let problem = embeddingServerURLProblem {
+            Label(problem, systemImage: "exclamationmark.triangle.fill")
+                .font(.caption)
+                .foregroundStyle(.orange)
+        }
+        Button("Refresh models") { refreshEmbeddingServer() }
+            .disabled(embeddingServerURLProblem != nil)
+        remotePicker(title: "Embedding model",
+                     models: remote.embeddingServerModels.map { InstalledModel(name: $0, sizeBytes: 0) },
+                     selection: $settings.embeddingModel,
+                     note: remote.embeddingServerNote)
+        Text("The server must serve an embedding model (llama-server: --embeddings). The list shows every model the server reports, including chat models.")
+            .font(.caption)
+            .foregroundStyle(.secondary)
     }
 
     private func refreshSavedKeys() {
@@ -774,7 +924,7 @@ struct SettingsView: View {
             refreshSavedKeys()   // light up the "Saved" badges immediately
             // A fresh key may unlock the remote model list for the current
             // provider's picker.
-            Task { await remote.refresh(for: settings.provider) }
+            refreshRemoteModels()
         } else {
             let ok = saved.isEmpty ? "" : "Saved: \(saved.joined(separator: ", ")). "
             // Show the real OSStatus reason; a stale item from an earlier build's
@@ -883,20 +1033,45 @@ struct SettingsView: View {
         }
     }
 
-    /// Gate on an embedding-model change (Phase 3): with indexed content, ask
-    /// before the required rebuild; on an empty index the change is free.
-    /// Flipping back to the model that built the index needs no prompt.
-    private func handleEmbeddingModelChange(from old: String, to new: String) {
-        if revertingEmbeddingModel {
-            revertingEmbeddingModel = false
+    /// Gate on an embedding backend/model change. An empty index changes for
+    /// free. With indexed content, the new embedder is checked against the
+    /// index's canary baseline: matching vectors (the same model behind
+    /// another runtime) keep the index; a real mismatch asks before the
+    /// required rebuild; a backend that can't answer changes nothing and
+    /// leaves the index untouched (ingest refuses until it can be verified).
+    /// URL-only edits are not checked here — the next ingest run verifies.
+    private func handleEmbeddingConfigChange(from old: EmbeddingConfig, to new: EmbeddingConfig) {
+        if revertingEmbeddingConfig {
+            revertingEmbeddingConfig = false
             return
         }
+        guard old.backend != new.backend || old.model != new.model else { return }
         guard let store = try? SQLiteStore(path: SettingsStore.databasePath),
               let messages = try? store.messageCount(), messages > 0 else { return }
-        if let stamp = try? store.embeddingStamp(),
-           OllamaStatus.modelName(stamp.model, matches: new) {
-            return  // returning to the indexed model; nothing to rebuild
+        Task {
+            switch await EmbeddingCanary.assess(store: store, embedder: EmbedderFactory.make(new)) {
+            case .emptyIndex:
+                break
+            case .compatible:
+                statusMessage = "\(new.label) produces vectors compatible with your index \u{2014} no re-index needed."
+            case .noBaseline:
+                // Index from before canaries existed: only the model name can
+                // vouch for it, as before.
+                if let stamp = try? store.embeddingStamp(),
+                   OllamaStatus.modelName(stamp.model, matches: new.model) {
+                    return
+                }
+                promptEmbeddingSwap(from: old, to: new, messages: messages)
+            case .incompatible:
+                promptEmbeddingSwap(from: old, to: new, messages: messages)
+            case .unverifiable(let error):
+                statusMessage = "Couldn\u{2019}t check whether \(new.label) matches your index (\(error)). "
+                    + "Your index is untouched; indexing pauses until it can be checked."
+            }
         }
+    }
+
+    private func promptEmbeddingSwap(from old: EmbeddingConfig, to new: EmbeddingConfig, messages: Int) {
         embeddingSwap = (from: old, to: new, messages: messages)
         showEmbeddingSwapConfirmation = true
     }
@@ -910,8 +1085,18 @@ struct SettingsView: View {
     private func cancelEmbeddingSwap() {
         guard let swap = embeddingSwap else { return }
         embeddingSwap = nil
-        revertingEmbeddingModel = true
-        settings.embeddingModel = swap.from
+        revertingEmbeddingConfig = true
+        settings.embeddingConfig = swap.from
+    }
+
+    /// Samples the index off the main actor; any failure just leaves the
+    /// budget panel on its estimate.
+    private func measureChunkSize() {
+        Task.detached(priority: .utility) {
+            let measured = (try? SQLiteStore(path: SettingsStore.databasePath))
+                .flatMap { try? $0.averageChunkChars() }
+            await MainActor.run { averageChunkChars = measured }
+        }
     }
 
     private func deleteAndRebuild() {

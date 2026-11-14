@@ -425,15 +425,15 @@ final class AskViewModel: NSObject, ObservableObject {
     /// embedding-model setting changes; rebuild on change (FR-9: settings apply
     /// on the next query). The session buffer resets with it, which is right —
     /// prior turns were retrieved under the old model.
-    private var serviceEmbeddingModel = ""
+    private var serviceEmbeddingConfig: EmbeddingConfig?
 
     private func service() throws -> QueryService {
-        let model = SettingsStore.shared.embeddingModel
-        if let queryService, serviceEmbeddingModel == model { return queryService }
+        let config = SettingsStore.shared.embeddingConfig
+        if let queryService, serviceEmbeddingConfig == config { return queryService }
         let store = try SQLiteStore(path: SettingsStore.databasePath)
-        let service = QueryService(store: store, embedder: OllamaEmbedder(model: model))
+        let service = QueryService(store: store, embedder: EmbedderFactory.make(config))
         queryService = service
-        serviceEmbeddingModel = model
+        serviceEmbeddingConfig = config
         return service
     }
 }

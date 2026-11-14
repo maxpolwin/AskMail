@@ -49,6 +49,65 @@ final class SettingsStoreTests: XCTestCase {
         XCTAssertEqual(reloaded.draftExcludedSenders, ["boss@example.com", "example.org"])
     }
 
+    func testLocalServerSettingsDefaultPersistAndSnapshot() {
+        let store = SettingsStore(defaults: defaults)
+        XCTAssertEqual(store.localServerURL, LocalServerEndpoint.defaultBase)
+        XCTAssertEqual(store.localServerModel, "")
+
+        store.provider = .localServer
+        store.localServerURL = "http://127.0.0.1:8080/v1"
+        store.localServerModel = "llama-3"
+
+        let reloaded = SettingsStore(defaults: defaults)
+        XCTAssertEqual(reloaded.provider, .localServer)
+        XCTAssertEqual(reloaded.localServerURL, "http://127.0.0.1:8080/v1")
+        XCTAssertEqual(reloaded.localServerModel, "llama-3")
+
+        let snapshot = reloaded.querySettings()
+        XCTAssertEqual(snapshot.localServerURL, "http://127.0.0.1:8080/v1")
+        XCTAssertEqual(snapshot.localServerModel, "llama-3")
+    }
+
+    func testEmbeddingBackendDefaultsPersistsAndSnapshots() {
+        let store = SettingsStore(defaults: defaults)
+        XCTAssertEqual(store.embeddingConfig,
+                       EmbeddingConfig(backend: .ollama, model: Defaults.embeddingModel,
+                                       serverURL: LocalServerEndpoint.defaultBase),
+                       "existing installs keep Ollama + their saved model")
+
+        store.embeddingConfig = EmbeddingConfig(backend: .localServer, model: "nomic-embed",
+                                                serverURL: "http://127.0.0.1:1234/v1")
+        let reloaded = SettingsStore(defaults: defaults)
+        XCTAssertEqual(reloaded.embeddingBackend, .localServer)
+        XCTAssertEqual(reloaded.embeddingModel, "nomic-embed")
+        XCTAssertEqual(reloaded.embeddingServerURL, "http://127.0.0.1:1234/v1")
+    }
+
+    func testExcerptsPerAnswerDefaultsPersistsAndFeedsRetrieval() {
+        let store = SettingsStore(defaults: defaults)
+        XCTAssertEqual(store.excerptsPerAnswer, Defaults.finalTopK)
+        XCTAssertEqual(store.querySettings().topK, Defaults.finalTopK)
+
+        store.excerptsPerAnswer = 20
+        XCTAssertEqual(SettingsStore(defaults: defaults).excerptsPerAnswer, 20)
+        XCTAssertEqual(store.querySettings().topK, 20)
+    }
+
+    func testStoredBudgetsAreClampedOnLoad() {
+        // A hand-edited defaults file must not reach the model unclamped.
+        defaults.set(900_000_000, forKey: "contextTokenLimit")
+        defaults.set(900_000, forKey: "answerTokenLimit")
+        defaults.set(5000, forKey: "excerptsPerAnswer")
+        let store = SettingsStore(defaults: defaults)
+        XCTAssertEqual(store.contextTokenLimit, Defaults.contextTokenRange.upperBound)
+        XCTAssertEqual(store.answerTokenLimit, Defaults.answerTokenRange.upperBound)
+        XCTAssertEqual(store.excerptsPerAnswer, Defaults.excerptRange.upperBound)
+
+        defaults.set(-7, forKey: "excerptsPerAnswer")
+        XCTAssertEqual(SettingsStore(defaults: defaults).excerptsPerAnswer, Defaults.finalTopK,
+                       "a nonsensical value falls back to the default")
+    }
+
     func testLegacyAccountDirectoryMigratesToAccountID() {
         defaults.set("/Users/x/Library/Mail/V10/ABC-DEF-123", forKey: "accountDirectory")
         let store = SettingsStore(defaults: defaults)

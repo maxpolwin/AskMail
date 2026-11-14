@@ -32,6 +32,29 @@ public enum Defaults {
     // MARK: Generation
     public static let contextTokenLimit = 4096
     public static let answerTokenLimit = 800
+    /// User-selectable ranges for the budget controls. Wide on purpose (the
+    /// user decides how much to allocate), but bounded: a value read from a
+    /// hand-edited defaults file must not ask a model server for an absurd
+    /// window. `SettingsStore` clamps stored values to these on load.
+    public static let contextTokenRange = 512...131_072
+    public static let answerTokenRange = 100...4000
+    /// Excerpts (retrieved chunks, not distinct emails) per answer. The 40 cap
+    /// stays under the 60 fused candidates the hybrid search produces.
+    public static let excerptRange = 1...40
+    /// Tokens reserved beside the email context and the answer for the system
+    /// prompt, the question and the session recap.
+    public static let promptScaffoldTokens = 2048
+    /// Largest window `QueryService` will ever request (maximum context +
+    /// maximum answer + scaffold).
+    public static let maxContextWindow = 131_072 + 4000 + 2048
+    /// A full chunk (~512 tokens) plus its `BEGIN EMAIL` wrapper and header.
+    /// Used until the index can give a measured average.
+    public static let fallbackTokensPerExcerpt = 550
+    /// Per-excerpt wrapper and header cost on top of the chunk text.
+    public static let excerptOverheadTokens = 40
+    /// Rough rule of thumb behind the memory estimate: about one gigabyte of
+    /// KV cache per thousand tokens of window. Not measured for any model.
+    public static let contextTokensPerGB = 1000
     public static let temperature = 0.2
     public static let sessionTurnCap = 3
     /// How long a cloud primary gets before ProviderRouter starts racing
@@ -262,4 +285,9 @@ public enum Defaults {
        figure, but never enough to clutter the answer. Do not use headings,
        tables, or bullet lists.
     """
+
+    /// Clamps `value` into `range`.
+    public static func clamp(_ value: Int, to range: ClosedRange<Int>) -> Int {
+        min(max(value, range.lowerBound), range.upperBound)
+    }
 }

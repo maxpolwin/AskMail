@@ -31,10 +31,28 @@ final class SettingsStore: ObservableObject {
     @Published var mistralModel: String {
         didSet { defaults.set(mistralModel, forKey: "mistralModel") }
     }
-    /// Local Ollama embedding model. Changing it invalidates the vector index
-    /// (vectors from different models don't mix) — the swap flow handles that.
+    /// Base URL of the local OpenAI-compatible server (loopback only;
+    /// validated by `LocalServerEndpoint` before every use).
+    @Published var localServerURL: String {
+        didSet { defaults.set(localServerURL, forKey: "localServerURL") }
+    }
+    @Published var localServerModel: String {
+        didSet { defaults.set(localServerModel, forKey: "localServerModel") }
+    }
+    /// Embedding model id on the selected backend. Changing it only
+    /// invalidates the vector index if the new embedder's vectors aren't
+    /// compatible with it (`EmbeddingCanary`) — the swap flow checks that.
     @Published var embeddingModel: String {
         didSet { defaults.set(embeddingModel, forKey: "embeddingModel") }
+    }
+    /// Which runtime serves embeddings, independent of the chat provider.
+    @Published var embeddingBackend: EmbeddingBackend {
+        didSet { defaults.set(embeddingBackend.rawValue, forKey: "embeddingBackend") }
+    }
+    /// Base URL of the embedding server for `.localServer` (loopback only;
+    /// validated by `LocalServerEndpoint` before every use).
+    @Published var embeddingServerURL: String {
+        didSet { defaults.set(embeddingServerURL, forKey: "embeddingServerURL") }
     }
     @Published var systemPrompt: String {
         didSet { defaults.set(systemPrompt, forKey: "systemPrompt") }
@@ -44,6 +62,10 @@ final class SettingsStore: ObservableObject {
     }
     @Published var answerTokenLimit: Int {
         didSet { defaults.set(answerTokenLimit, forKey: "answerTokenLimit") }
+    }
+    /// Retrieved excerpts (chunks) put into each answer's context.
+    @Published var excerptsPerAnswer: Int {
+        didSet { defaults.set(excerptsPerAnswer, forKey: "excerptsPerAnswer") }
     }
     /// On-disk id (UUID directory name) of the selected Apple Mail account.
     @Published var accountID: String {
@@ -114,7 +136,11 @@ final class SettingsStore: ObservableObject {
         localChatModel = defaults.string(forKey: "localChatModel") ?? Defaults.localChatModel
         cloudChatModel = defaults.string(forKey: "cloudChatModel") ?? Defaults.cloudChatModel
         mistralModel = defaults.string(forKey: "mistralModel") ?? Defaults.mistralChatModel
+        localServerURL = defaults.string(forKey: "localServerURL") ?? LocalServerEndpoint.defaultBase
+        localServerModel = defaults.string(forKey: "localServerModel") ?? ""
         embeddingModel = defaults.string(forKey: "embeddingModel") ?? Defaults.embeddingModel
+        embeddingBackend = EmbeddingBackend(rawValue: defaults.string(forKey: "embeddingBackend") ?? "") ?? .ollama
+        embeddingServerURL = defaults.string(forKey: "embeddingServerURL") ?? LocalServerEndpoint.defaultBase
         systemPrompt = defaults.string(forKey: "systemPrompt") ?? Defaults.defaultSystemPrompt
         // First run has no stored token budgets: seed them from the machine +
         // default local model rather than a flat constant. Users can retune in
@@ -125,9 +151,16 @@ final class SettingsStore: ObservableObject {
             isLocal: true, modelSizeMB: firstRunModelMB,
             physicalMemoryBytes: ProcessInfo.processInfo.physicalMemory)
         let contextLimit = defaults.integer(forKey: "contextTokenLimit")
-        contextTokenLimit = contextLimit > 0 ? contextLimit : recommended.contextTokens
+        // Stored values are clamped: a hand-edited defaults file must not make
+        // QueryService ask a model for an absurd window.
+        contextTokenLimit = contextLimit > 0
+            ? Defaults.clamp(contextLimit, to: Defaults.contextTokenRange) : recommended.contextTokens
         let answerLimit = defaults.integer(forKey: "answerTokenLimit")
-        answerTokenLimit = answerLimit > 0 ? answerLimit : recommended.answerTokens
+        answerTokenLimit = answerLimit > 0
+            ? Defaults.clamp(answerLimit, to: Defaults.answerTokenRange) : recommended.answerTokens
+        let excerpts = defaults.integer(forKey: "excerptsPerAnswer")
+        excerptsPerAnswer = excerpts > 0
+            ? Defaults.clamp(excerpts, to: Defaults.excerptRange) : Defaults.finalTopK
         accountID = defaults.string(forKey: "accountID") ?? ""
         accountEmail = defaults.string(forKey: "accountEmail") ?? ""
         lastVectorized = defaults.object(forKey: "lastVectorized") as? Date
@@ -171,15 +204,32 @@ final class SettingsStore: ObservableObject {
         accountEmail.isEmpty ? accountID : accountEmail
     }
 
+    /// The embedding configuration as one value, for the factory and for
+    /// change detection. Read on the main actor, then passed to background work.
+    var embeddingConfig: EmbeddingConfig {
+        get {
+            EmbeddingConfig(backend: embeddingBackend, model: embeddingModel,
+                            serverURL: embeddingServerURL)
+        }
+        set {
+            embeddingBackend = newValue.backend
+            embeddingModel = newValue.model
+            embeddingServerURL = newValue.serverURL
+        }
+    }
+
     /// Snapshot for one query (FR-9: settings changes apply on the next query).
     func querySettings() -> QuerySettings {
         QuerySettings(provider: provider,
                       systemPrompt: systemPrompt,
                       contextTokenLimit: contextTokenLimit,
                       answerTokenLimit: answerTokenLimit,
+                      topK: excerptsPerAnswer,
                       localModel: localChatModel,
                       cloudModel: cloudChatModel,
-                      mistralModel: mistralModel)
+                      mistralModel: mistralModel,
+                      localServerURL: localServerURL,
+                      localServerModel: localServerModel)
     }
 
     // nonisolated: pure FileManager path derivation, no isolated state —

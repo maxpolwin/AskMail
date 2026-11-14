@@ -115,7 +115,7 @@ final class DraftServiceProvider: NSObject {
     private static func generateOnDemandDetached(forSenderAddress email: String, preferredSelection: String? = nil) {
         let settings = SettingsStore.shared
         let localChatModel = settings.localChatModel
-        let embeddingModel = settings.embeddingModel
+        let embedding = settings.embeddingConfig
         let accountEmail = settings.accountEmail
 
         Task.detached(priority: .userInitiated) {
@@ -144,7 +144,7 @@ final class DraftServiceProvider: NSObject {
                 // Local-only regardless of the configured Q&A provider,
                 // matching every other Draft-Modus generation path (H-11).
                 let chatProvider = OllamaClient(host: Defaults.ollamaLocalHost, model: localChatModel)
-                let embedder = OllamaEmbedder(model: embeddingModel)
+                let embedder = EmbedderFactory.make(embedding)
                 let record = try await DraftJobProcessor.regenerateDraft(
                     threadID: threadID, draftStore: draftStore, askStore: askStore,
                     chatProvider: chatProvider, embedder: embedder, accountEmail: accountEmail)

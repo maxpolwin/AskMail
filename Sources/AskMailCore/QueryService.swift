@@ -4,6 +4,9 @@ public enum ProviderChoice: String, Sendable, CaseIterable, Codable {
     case ollamaLocal
     case ollamaCloud
     case mistral
+    /// A local OpenAI-compatible server (LM Studio, llama.cpp, MLX, vLLM…),
+    /// loopback-only. Never leaves the device, so no egress event.
+    case localServer
 }
 
 /// Everything a single query needs from settings (FR-9: changes take effect
@@ -20,6 +23,10 @@ public struct QuerySettings: Sendable {
     public var localModel: String
     public var cloudModel: String
     public var mistralModel: String
+    /// Raw user-entered base URL of the local server; validated in
+    /// `makeRouter` (loopback only), not trusted here.
+    public var localServerURL: String
+    public var localServerModel: String
 
     public init(provider: ProviderChoice = .ollamaLocal,
                 systemPrompt: String = Defaults.defaultSystemPrompt,
@@ -31,7 +38,9 @@ public struct QuerySettings: Sendable {
                 ollamaHost: URL = Defaults.ollamaLocalHost,
                 localModel: String = Defaults.localChatModel,
                 cloudModel: String = Defaults.cloudChatModel,
-                mistralModel: String = Defaults.mistralChatModel) {
+                mistralModel: String = Defaults.mistralChatModel,
+                localServerURL: String = LocalServerEndpoint.defaultBase,
+                localServerModel: String = "") {
         self.provider = provider
         self.systemPrompt = systemPrompt
         self.contextTokenLimit = contextTokenLimit
@@ -43,6 +52,8 @@ public struct QuerySettings: Sendable {
         self.localModel = localModel
         self.cloudModel = cloudModel
         self.mistralModel = mistralModel
+        self.localServerURL = localServerURL
+        self.localServerModel = localServerModel
     }
 }
 
@@ -125,8 +136,7 @@ public final class QueryService: @unchecked Sendable {
                                   user: prompt.user,
                                   maxTokens: settings.answerTokenLimit,
                                   temperature: settings.temperature,
-                                  contextWindow: settings.contextTokenLimit
-                                      + settings.answerTokenLimit + 2048)
+                                  contextWindow: Self.contextWindow(for: settings))
         let upstream = router.stream(request)
 
         let events = AsyncThrowingStream<ChatEvent, Error> { continuation in
@@ -244,7 +254,39 @@ public final class QueryService: @unchecked Sendable {
             let key = Keychain.apiKey(service: Defaults.keychainServiceMistral) ?? ""
             let mistral = MistralClient(apiKey: key, model: settings.mistralModel)
             return ProviderRouter(primary: mistral, fallback: local, log: log)
+        case .localServer:
+            // Local-only like .ollamaLocal: no fallback, no egress. A bad URL
+            // or missing model surfaces as an actionable error at stream time
+            // rather than silently routing somewhere else.
+            return ProviderRouter(primary: Self.localServerProvider(settings: settings),
+                                  fallback: nil, log: log)
         }
+    }
+
+    static func localServerProvider(settings: QuerySettings) -> ChatProvider {
+        let base: URL
+        do {
+            base = try LocalServerEndpoint.validate(settings.localServerURL)
+        } catch let error as ProviderError {
+            return FailingChatProvider(error: error)
+        } catch {
+            return FailingChatProvider(error: .invalidEndpoint("\(error)"))
+        }
+        let model = settings.localServerModel.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !model.isEmpty else {
+            return FailingChatProvider(error: .invalidEndpoint(
+                "Choose a model for the local server in Settings \u{2192} Models."))
+        }
+        return OpenAIChatClient(baseURL: base, model: model)
+    }
+
+    /// The window requested from the model: email budget + answer + prompt
+    /// scaffold, never beyond `Defaults.maxContextWindow` even if the settings
+    /// hold an out-of-range value.
+    static func contextWindow(for settings: QuerySettings) -> Int {
+        min(Defaults.maxContextWindow,
+            max(0, settings.contextTokenLimit) + max(0, settings.answerTokenLimit)
+                + Defaults.promptScaffoldTokens)
     }
 
     /// Caps text logged at a level shipped on by default, keeping the log
