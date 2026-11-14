@@ -468,7 +468,13 @@ struct AskView: View {
     /// Height of everything in the card above the scroll area (question field,
     /// hairline, warning), measured live so `scrollCap` can subtract it.
     @State private var chromeHeight: CGFloat = 0
+    /// Height of the pinned sources block under the answer, measured live so
+    /// `scrollCap` leaves room for it.
+    @State private var sourcesHeight: CGFloat = 0
     private let minAnswerHeight: CGFloat = 120
+    /// Smaller floor once sources are pinned below: on a short panel, keeping
+    /// the citations visible beats showing a few more lines of answer.
+    private let minAnswerHeightWithSources: CGFloat = 48
     /// Scale with System Settings ▸ Accessibility ▸ Display ▸ Text Size
     /// instead of staying pinned at a fixed point size.
     @ScaledMetric(relativeTo: .title2) private var questionFontSize: CGFloat = 21
@@ -539,9 +545,36 @@ struct AskView: View {
 
     /// The scroll area grows with the panel: taller window → more answer
     /// visible before it scrolls, not just more invisible space below the
-    /// card. Floored so a very short/minimized panel still shows something.
+    /// card. Reserves the pinned sources block (plus its 12pt card spacing)
+    /// so it always fits below. Floored so a very short panel still shows
+    /// something.
     private func scrollCap(for availableHeight: CGFloat) -> CGFloat {
-        max(minAnswerHeight, availableHeight - chromeHeight - 16 * 2 - 12)
+        let hasSources = !model.sources.isEmpty
+        let reserved = hasSources ? sourcesHeight + 12 : 0
+        let floor = hasSources ? minAnswerHeightWithSources : minAnswerHeight
+        return max(floor, availableHeight - chromeHeight - 16 * 2 - 12 - reserved)
+    }
+
+    /// Divider, "Sources" heading, and one row per source. Selectable like the
+    /// answer, and the same Copy menu copies answer + sources together.
+    private var sourcesList: some View {
+        VStack(alignment: .leading, spacing: 12) {
+            Divider()
+            Text(Defaults.sourcesListLabel)
+                .font(.caption.weight(.semibold))
+                .foregroundStyle(.secondary)
+            let pct = relevancePercents(model.sources)
+            ForEach(model.sources, id: \.number) { source in
+                SourceRow(number: source.number, ref: source.ref,
+                          percent: pct[source.number],
+                          accessibleLinks: accessibleControlsEnabled,
+                          highContrast: settings.highContrastEnabled)
+            }
+        }
+        .textSelection(.enabled)
+        .padding(.trailing, 6)  // same right edge as the answer text above
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .contextMenu { Button("Copy") { copyOutput() } }
     }
 
     private func card(availableHeight: CGFloat) -> some View {
@@ -590,54 +623,49 @@ struct AskView: View {
 
             // Present only when there's something to show — otherwise the card
             // ends at the hairline. Grows with content up to a cap, then scrolls.
-            // Text is selectable and the source lines carry link attributes, so
-            // they stay clickable; each source also gets a relevance bar.
-            if !model.answer.isEmpty || !model.sources.isEmpty {
+            // Text is selectable, so it can be copied in part.
+            if !model.answer.isEmpty {
                 ScrollView {
-                    VStack(alignment: .leading, spacing: 12) {
-                        if !model.answer.isEmpty {
-                            Text(styledAnswer)
-                                .font(.system(size: answerFontSize))
-                                .frame(maxWidth: .infinity, alignment: .leading)
-                        }
-                        if !model.sources.isEmpty {
-                            Divider()
-                            Text(Defaults.sourcesListLabel)
-                                .font(.caption.weight(.semibold))
-                                .foregroundStyle(.secondary)
-                            let pct = relevancePercents(model.sources)
-                            ForEach(model.sources, id: \.number) { source in
-                                SourceRow(number: source.number, ref: source.ref,
-                                          percent: pct[source.number],
-                                          accessibleLinks: accessibleControlsEnabled,
-                                          highContrast: settings.highContrastEnabled)
+                    Text(styledAnswer)
+                        .font(.system(size: answerFontSize))
+                        .textSelection(.enabled)
+                        .padding(.trailing, 6)  // breathing room before the (floating) scroll indicator
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                        .contextMenu { Button("Copy") { copyOutput() } }
+                        .background(
+                            ZStack {
+                                OverlayScrollerStyle()
+                                GeometryReader { geo in
+                                    Color.clear.preference(key: ContentHeightKey.self, value: geo.size.height)
+                                }
                             }
-                        }
-                    }
-                    .textSelection(.enabled)
-                    .padding(.trailing, 6)  // breathing room before the (floating) scroll indicator
-                    .frame(maxWidth: .infinity, alignment: .leading)
-                    .contextMenu { Button("Copy") { copyOutput() } }
-                    .background(
-                        ZStack {
-                            OverlayScrollerStyle()
-                            GeometryReader { geo in
-                                Color.clear.preference(key: ContentHeightKey.self, value: geo.size.height)
-                            }
-                        }
-                    )
+                        )
                 }
                 .contentMargins(.trailing, 8, for: .scrollIndicators)
                 .frame(height: min(answerHeight, scrollCap(for: availableHeight)))
                 .onPreferenceChange(ContentHeightKey.self) { answerHeight = $0 }
-                // Auto-copy the finished response; the toast confirms it.
-                .onChange(of: model.isStreaming) { _, streaming in
-                    if !streaming, !model.answer.isEmpty { copyOutput() }
-                }
+            }
+
+            // Sources sit outside the scroll area, pinned under it: a long
+            // answer scrolls on its own and never pushes the citations out of
+            // view. `scrollCap` reserves their measured height.
+            if !model.sources.isEmpty {
+                sourcesList
+                    .background(GeometryReader { geo in
+                        Color.clear.preference(key: SourcesHeightKey.self, value: geo.size.height)
+                    })
+                    .onPreferenceChange(SourcesHeightKey.self) { sourcesHeight = $0 }
             }
         }
         .padding(16)
         .frame(maxWidth: .infinity, alignment: .leading)
+        // Auto-copy the finished response; the toast confirms it.
+        .onChange(of: model.isStreaming) { _, streaming in
+            if !streaming, !model.answer.isEmpty { copyOutput() }
+        }
+        // Behind the content, above the material: the card's margins and the
+        // gaps between its sections drag the panel, even mid-answer.
+        .background(WindowDragArea())
         .background(.ultraThinMaterial, in: RoundedRectangle(cornerRadius: 16, style: .continuous))
         .overlay(
             RoundedRectangle(cornerRadius: 16, style: .continuous)
@@ -745,6 +773,14 @@ struct AskView: View {
 /// Reports the intrinsic height of the answer/sources stack so the scroll area
 /// can hug short answers and only scroll once they exceed the cap.
 private struct ContentHeightKey: PreferenceKey {
+    static let defaultValue: CGFloat = 0
+    static func reduce(value: inout CGFloat, nextValue: () -> CGFloat) {
+        value = max(value, nextValue())
+    }
+}
+
+/// Height of the pinned sources block, so `AskView.scrollCap` can reserve it.
+private struct SourcesHeightKey: PreferenceKey {
     static let defaultValue: CGFloat = 0
     static func reduce(value: inout CGFloat, nextValue: () -> CGFloat) {
         value = max(value, nextValue())
