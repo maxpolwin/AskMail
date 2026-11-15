@@ -307,8 +307,11 @@ final class LocalServerTests: XCTestCase {
     func testTokenAdvisorForLocalServer() {
         let unknown = TokenAdvisor.recommendLocalServer(serverContextTokens: nil)
         XCTAssertEqual(unknown.contextTokens, Defaults.contextTokenLimit)
+        // The default excerpts' budget (8 x 550 x 1.25, rounded up to 512) fits an 8k window.
         let known = TokenAdvisor.recommendLocalServer(serverContextTokens: 8192)
-        XCTAssertEqual(known.contextTokens, 6144)   // 8192 - 800 - 1000 = 6392, snapped to 512
+        XCTAssertEqual(known.contextTokens, 5632)
+        // A 4k window can't hold it: 4096 - 800 - 1000 = 2296, snapped down to 512.
+        XCTAssertEqual(TokenAdvisor.recommendLocalServer(serverContextTokens: 4096).contextTokens, 2048)
         let tiny = TokenAdvisor.recommendLocalServer(serverContextTokens: 2048)
         XCTAssertEqual(tiny.contextTokens, 1024, "clamped to the floor")
         XCTAssertEqual(TokenAdvisor.minimumServerContext(context: 4096, answer: 800), 5896)

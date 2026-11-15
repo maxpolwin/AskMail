@@ -142,14 +142,10 @@ final class SettingsStore: ObservableObject {
         embeddingBackend = EmbeddingBackend(rawValue: defaults.string(forKey: "embeddingBackend") ?? "") ?? .ollama
         embeddingServerURL = defaults.string(forKey: "embeddingServerURL") ?? LocalServerEndpoint.defaultBase
         systemPrompt = defaults.string(forKey: "systemPrompt") ?? Defaults.defaultSystemPrompt
-        // First run has no stored token budgets: seed them from the machine +
-        // default local model rather than a flat constant. Users can retune in
-        // Settings (the "Use recommended" affordance stays available there).
-        let firstRunModelMB = ModelCatalog.chat
-            .first { $0.id == Defaults.localChatModel }?.approxSizeMB ?? 4700
-        let recommended = TokenAdvisor.recommend(
-            isLocal: true, modelSizeMB: firstRunModelMB,
-            physicalMemoryBytes: ProcessInfo.processInfo.physicalMemory)
+        // First run has no stored token budgets: seed them from the advisor's
+        // defaults (model facts aren't known yet). Users can retune in Settings,
+        // where "Use recommended" re-derives them from the chosen model.
+        let recommended = TokenAdvisor.firstRun()
         let contextLimit = defaults.integer(forKey: "contextTokenLimit")
         // Stored values are clamped: a hand-edited defaults file must not make
         // QueryService ask a model for an absurd window.

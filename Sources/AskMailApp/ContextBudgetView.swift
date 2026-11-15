@@ -16,8 +16,9 @@ struct ContextBudgetView: View {
     /// Per-excerpt token cost, measured from the index when it has chunks.
     let tokensPerExcerpt: Int
     let isMeasured: Bool
-    /// Memory left for the window on this Mac (local Ollama only).
-    let availableMemoryGB: Double?
+    /// What the selected model plus its window costs against this Mac's GPU
+    /// limit; nil when the model's architecture isn't known.
+    let memory: ModelMemory?
     /// Window a local OpenAI-compatible server reports, when it reports one.
     let serverWindowTokens: Int?
     let recommended: TokenAdvisor.Recommendation
@@ -28,7 +29,7 @@ struct ContextBudgetView: View {
     private var budget: ContextBudget {
         ContextBudget(excerpts: excerpts, contextTokens: context, answerTokens: answer,
                       tokensPerExcerpt: tokensPerExcerpt,
-                      availableMemoryGB: availableMemoryGB,
+                      memory: memory,
                       serverWindowTokens: serverWindowTokens)
     }
 
@@ -57,8 +58,8 @@ struct ContextBudgetView: View {
             controlRow("Answer tokens", value: $answer, range: Defaults.answerTokenRange,
                        step: 100, detail: "the longest reply")
 
-            if let estimated = budget.estimatedMemoryGB, let available = budget.availableMemoryGB {
-                MemoryGauge(estimatedGB: estimated, availableGB: available)
+            if let estimated = budget.estimatedMemoryGB, let limit = budget.gpuLimitGB {
+                MemoryGauge(estimatedGB: estimated, limitGB: limit)
             }
 
             StatusLine(status: budget.status, tokensPerExcerpt: tokensPerExcerpt,
@@ -71,14 +72,14 @@ struct ContextBudgetView: View {
                 .font(.caption)
                 .foregroundStyle(.secondary)
 
-            if excerpts != Defaults.finalTopK || context != recommended.contextTokens
+            if excerpts != recommended.excerpts || context != recommended.contextTokens
                 || answer != recommended.answerTokens {
                 HStack(spacing: 8) {
-                    Text("Recommended: \(recommended.contextTokens.formatted()) context, \(recommended.answerTokens.formatted()) answer, \(Defaults.finalTopK) excerpts.")
+                    Text("Recommended: \(recommended.excerpts) excerpts, \(recommended.contextTokens.formatted()) context, \(recommended.answerTokens.formatted()) answer.")
                         .font(.caption)
                         .foregroundStyle(.secondary)
                     Button("Use recommended") {
-                        excerpts = Defaults.finalTopK
+                        excerpts = recommended.excerpts
                         context = recommended.contextTokens
                         answer = recommended.answerTokens
                     }
@@ -242,27 +243,29 @@ private struct WindowBar: View {
 
 private struct MemoryGauge: View {
     let estimatedGB: Double
-    let availableGB: Double
+    let limitGB: Double
 
     var body: some View {
+        let estimate = estimatedGB.formatted(.number.precision(.fractionLength(1)))
+        let limit = limitGB.formatted(.number.precision(.fractionLength(0)))
         VStack(alignment: .leading, spacing: 4) {
             HStack {
-                Text("Memory for this window (rough estimate)")
+                Text("Model memory with this window")
                 Spacer()
-                Text("about \(estimatedGB.formatted(.number.precision(.fractionLength(1)))) GB")
+                Text("about \(estimate) GB")
                     .monospacedDigit()
             }
             .font(.caption)
             .foregroundStyle(.secondary)
 
             Canvas { context, size in
-                let scale = max(availableGB * 1.3, estimatedGB * 1.05, 0.1)
+                let scale = max(limitGB * 1.15, estimatedGB * 1.05, 0.1)
                 let track = Path(roundedRect: CGRect(origin: .zero, size: size), cornerRadius: 4)
                 context.fill(track, with: .color(Color.gray.opacity(0.18)))
                 let fill = CGRect(x: 0, y: 0,
                                   width: min(1, estimatedGB / scale) * size.width, height: size.height)
                 context.fill(Path(roundedRect: fill, cornerRadius: 4), with: .color(Color.primary.opacity(0.55)))
-                let tickX = min(1, availableGB / scale) * size.width
+                let tickX = min(1, limitGB / scale) * size.width
                 var tick = Path()
                 tick.move(to: CGPoint(x: tickX, y: -2))
                 tick.addLine(to: CGPoint(x: tickX, y: size.height + 2))
@@ -270,10 +273,10 @@ private struct MemoryGauge: View {
             }
             .frame(height: 12)
             .accessibilityElement(children: .ignore)
-            .accessibilityLabel("Memory gauge")
-            .accessibilityValue("about \(estimatedGB.formatted(.number.precision(.fractionLength(1)))) gigabytes of about \(availableGB.formatted(.number.precision(.fractionLength(0)))) free")
+            .accessibilityLabel("Model memory gauge")
+            .accessibilityValue("about \(estimate) gigabytes; this Mac lets the GPU use about \(limit)")
 
-            Text("The marker is what this Mac has free for the window, about \(availableGB.formatted(.number.precision(.fractionLength(0)))) GB. The estimate is a rule of thumb, not a measurement.")
+            Text("The marker is what this Mac lets the GPU use, about \(limit) GB. The estimate comes from this model\u{2019}s size and window and ran 3% to 15% above measured sizes in testing, never below.")
                 .font(.caption2)
                 .foregroundStyle(.secondary)
                 .fixedSize(horizontal: false, vertical: true)
@@ -319,9 +322,13 @@ private struct StatusLine: View {
             return ("info.circle",
                     "Excerpts fill \(percent)% of the email budget. Add excerpts to use more of it, or lower the context to save memory.",
                     false)
-        case .aboveMemory(let estimated, let available):
+        case .aboveMemory(let estimated, let limit):
             return ("exclamationmark.triangle",
-                    "Above what this Mac has free for the model (about \(estimated.formatted(.number.precision(.fractionLength(1)))) GB against \(available.formatted(.number.precision(.fractionLength(0)))) GB). Replies may slow down or fail, and your model\u{2019}s own maximum window still applies.",
+                    "This model with this window needs about \(estimated.formatted(.number.precision(.fractionLength(1)))) GB, close to or past the \(limit.formatted(.number.precision(.fractionLength(0)))) GB this Mac lets the GPU use. Ollama then moves part of the model to the CPU, which is much slower.",
+                    true)
+        case .aboveModelWindow(let maxTokens):
+            return ("exclamationmark.triangle",
+                    "Larger than the \(maxTokens.formatted())-token window this model was built for. Lower the context or choose a model with a longer window.",
                     true)
         case .aboveServerWindow(let server):
             return ("exclamationmark.triangle",

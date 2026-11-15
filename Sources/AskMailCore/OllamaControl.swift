@@ -29,10 +29,18 @@ public struct InstalledModel: Sendable, Equatable {
 public struct OllamaModelInfo: Sendable, Equatable {
     public let capabilities: [String]
     public let embeddingLength: Int?
+    /// What the model's context window costs in memory; nil when `/api/show`
+    /// doesn't describe it well enough to say (see `ModelArchitecture.parse`).
+    public let architecture: ModelArchitecture?
+    /// Parameter count in billions, from `details.parameter_size` ("7.6B").
+    public let parameterBillions: Double?
 
-    public init(capabilities: [String] = [], embeddingLength: Int? = nil) {
+    public init(capabilities: [String] = [], embeddingLength: Int? = nil,
+                architecture: ModelArchitecture? = nil, parameterBillions: Double? = nil) {
         self.capabilities = capabilities
         self.embeddingLength = embeddingLength
+        self.architecture = architecture
+        self.parameterBillions = parameterBillions
     }
 }
 
@@ -196,8 +204,28 @@ public struct OllamaControl: OllamaControlling {
         let embeddingLength = modelInfo
             .first { $0.key.hasSuffix(".embedding_length") }
             .flatMap { ($0.value as? NSNumber)?.intValue }
-        return OllamaModelInfo(capabilities: json["capabilities"] as? [String] ?? [],
-                               embeddingLength: embeddingLength)
+        let capabilities = json["capabilities"] as? [String] ?? []
+        // Embedding models have no chat window to size; skip their architecture.
+        let architecture = capabilities.contains("embedding") ? nil
+            : ModelArchitecture.parse(modelInfo: modelInfo)
+        let details = json["details"] as? [String: Any]
+        return OllamaModelInfo(capabilities: capabilities,
+                               embeddingLength: embeddingLength,
+                               architecture: architecture,
+                               parameterBillions: (details?["parameter_size"] as? String)
+                                   .flatMap(Self.parseParameterBillions))
+    }
+
+    /// "7.6B" → 7.6, "494M" → 0.494; nil for anything else.
+    static func parseParameterBillions(_ text: String) -> Double? {
+        let trimmed = text.trimmingCharacters(in: .whitespaces).uppercased()
+        guard let unit = trimmed.last, let value = Double(trimmed.dropLast()), value > 0 else { return nil }
+        switch unit {
+        case "B": return value
+        case "M": return value / 1000
+        case "T": return value * 1000
+        default: return nil
+        }
     }
 
     /// One NDJSON line of `/api/pull` output, or nil for blank/non-JSON lines.

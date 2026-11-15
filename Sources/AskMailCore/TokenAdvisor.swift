@@ -1,62 +1,93 @@
 import Foundation
 
-/// Recommends context- and answer-token budgets for the current provider and
-/// machine. A local model's context is bounded by free RAM — Ollama's KV cache
-/// grows with the context window — so the recommendation leaves room for the
-/// model weights and the OS. A cloud provider runs remotely, so RAM doesn't
-/// bind and the context can be more generous.
+/// Recommends excerpt, context and answer budgets for the current provider
+/// and model. Grounded in measurements (docs/model-tuning.md): memory follows
+/// the model's real architecture (`ModelMemory`), and the number of excerpts
+/// follows how many a model of that size can use well, not how many fit.
 public enum TokenAdvisor {
     public struct Recommendation: Equatable, Sendable {
         public let contextTokens: Int
         public let answerTokens: Int
+        public let excerpts: Int
         /// One-line, user-facing explanation of how these were derived.
         public let rationale: String
-    }
 
-    public static func recommend(isLocal: Bool, modelSizeMB: Int,
-                                 physicalMemoryBytes: UInt64) -> Recommendation {
-        let ramGB = Double(physicalMemoryBytes) / 1_073_741_824
-
-        guard isLocal else {
-            return Recommendation(
-                contextTokens: 8192,
-                answerTokens: 1000,
-                rationale: "Runs in the cloud, so your Mac's memory isn't the limit. "
-                    + "A larger context lets more sources inform each answer.")
+        public init(contextTokens: Int, answerTokens: Int,
+                    excerpts: Int = Defaults.finalTopK, rationale: String) {
+            self.contextTokens = contextTokens
+            self.answerTokens = answerTokens
+            self.excerpts = excerpts
+            self.rationale = rationale
         }
-
-        let modelGB = Double(modelSizeMB) / 1000
-        // The free memory is the KV-cache budget, at roughly a thousand
-        // tokens of window per gigabyte. The window holds the email context
-        // plus the answer plus the prompt scaffold, so the context gets what
-        // is left after those (the Settings gauge uses the same arithmetic,
-        // so the recommendation never lands in its own warning).
-        let freeGB = availableMemoryGB(modelSizeMB: modelSizeMB, physicalMemoryBytes: physicalMemoryBytes)
-        let windowTokens = Int(freeGB * Double(Defaults.contextTokensPerGB))
-        let context = step(windowTokens - Defaults.promptScaffoldTokens - 1000,
-                           min: 2048, max: 16384, step: 512)
-        let answer = context >= 8192 ? 1000 : 800
-        return Recommendation(
-            contextTokens: context,
-            answerTokens: answer,
-            rationale: "Tuned to \(Int(ramGB.rounded())) GB of memory and a "
-                + "\(String(format: "%.1f", modelGB)) GB model. More context means more "
-                + "email per answer, but uses more memory and slows replies.")
     }
 
-    /// Memory left for the context window after the model weights and ~3 GB
-    /// for the OS and app. The recommendation and the budget gauge share it.
-    public static func availableMemoryGB(modelSizeMB: Int, physicalMemoryBytes: UInt64) -> Double {
-        let ramGB = Double(physicalMemoryBytes) / 1_073_741_824
-        return max(0, ramGB - Double(modelSizeMB) / 1000 - 3)
+    /// Models below this many billion parameters lost accuracy once the prompt
+    /// passed roughly 8k tokens and rarely cited sources in the benchmark, so
+    /// they get fewer excerpts.
+    public static let smallModelBillions = 4.5
+    static let smallModelExcerpts = 8
+    static let regularModelExcerpts = 13
+    static let defaultAnswerTokens = 1000
+
+    /// Headroom over the excerpts' own tokens, so a few long chunks don't push
+    /// the lowest-ranked excerpt out of the budget.
+    static let budgetHeadroom = 1.25
+
+    /// Budgets for a local Ollama model. `memory` nil (architecture unknown)
+    /// skips the memory cap rather than guessing one.
+    public static func recommendLocal(parameterBillions: Double?, memory: ModelMemory?,
+                                      tokensPerExcerpt: Int = Defaults.fallbackTokensPerExcerpt) -> Recommendation {
+        let small = (parameterBillions ?? .infinity) < smallModelBillions
+        let excerpts = parameterBillions == nil ? Defaults.finalTopK
+            : (small ? smallModelExcerpts : regularModelExcerpts)
+        var context = roundUp(Int(Double(excerpts * tokensPerExcerpt) * budgetHeadroom), to: 512)
+        var notes: [String] = []
+
+        if let memory {
+            // Never recommend a window the Mac can't hold on the GPU.
+            let fit = memory.maxWindowTokens() - Defaults.promptScaffoldTokens - defaultAnswerTokens
+            if fit < context {
+                context = max(Defaults.contextTokenRange.lowerBound, fit / 512 * 512)
+                notes.append("Lowered to what this Mac can hold with this model.")
+            }
+            if let modelMax = memory.architecture.maxContextTokens {
+                let limit = modelMax - Defaults.promptScaffoldTokens - defaultAnswerTokens
+                if limit < context { context = max(Defaults.contextTokenRange.lowerBound, limit / 512 * 512) }
+            }
+        }
+        context = Defaults.clamp(context, to: Defaults.contextTokenRange)
+
+        var rationale = small
+            ? "Small models (under about 4B parameters) lose accuracy as the prompt grows and often skip source citations, so fewer excerpts work better. A 7B model such as qwen2.5:7b cited reliably in testing, at about three times the waiting time."
+            : "\(excerpts) excerpts balanced source coverage against waiting time in testing; each extra excerpt adds waiting time."
+        if parameterBillions == nil {
+            rationale = "The model\u{2019}s size isn\u{2019}t known, so this uses the default number of excerpts."
+        }
+        if !notes.isEmpty { rationale += " " + notes.joined(separator: " ") }
+        return Recommendation(contextTokens: context, answerTokens: defaultAnswerTokens,
+                              excerpts: excerpts, rationale: rationale)
+    }
+
+    /// Cloud providers: the model and memory are remote, so memory isn't the
+    /// limit and the regular excerpt count applies.
+    public static func recommendCloud(tokensPerExcerpt: Int = Defaults.fallbackTokensPerExcerpt) -> Recommendation {
+        let excerpts = regularModelExcerpts
+        return Recommendation(
+            contextTokens: Defaults.clamp(roundUp(Int(Double(excerpts * tokensPerExcerpt) * budgetHeadroom), to: 512),
+                                          to: Defaults.contextTokenRange),
+            answerTokens: defaultAnswerTokens,
+            excerpts: excerpts,
+            rationale: "Runs in the cloud, so your Mac\u{2019}s memory isn\u{2019}t the limit.")
     }
 
     /// Budgets for a local OpenAI-compatible server. Its context window is the
     /// server's own setting (the API can't request one), so the email budget is
     /// what fits beside the answer and ~1k tokens of system prompt + question.
-    /// Unknown context → the conservative 4096/800 defaults.
-    public static func recommendLocalServer(serverContextTokens: Int?) -> Recommendation {
+    /// Unknown context → the conservative defaults.
+    public static func recommendLocalServer(serverContextTokens: Int?,
+                                            tokensPerExcerpt: Int = Defaults.fallbackTokensPerExcerpt) -> Recommendation {
         let answer = 800
+        let wanted = roundUp(Int(Double(Defaults.finalTopK * tokensPerExcerpt) * budgetHeadroom), to: 512)
         guard let server = serverContextTokens, server > 0 else {
             return Recommendation(
                 contextTokens: Defaults.contextTokenLimit,
@@ -65,10 +96,9 @@ public enum TokenAdvisor {
                     + "Set it to at least \(minimumServerContext(context: Defaults.contextTokenLimit, answer: answer)) "
                     + "tokens in the server app, or lower the context budget here.")
         }
-        let context = step(server - answer - 1000, min: 1024,
-                           max: Defaults.contextTokenRange.upperBound, step: 512)
+        let fits = max(1024, (server - answer - 1000) / 512 * 512)
         return Recommendation(
-            contextTokens: context,
+            contextTokens: Defaults.clamp(min(wanted, fits), to: Defaults.contextTokenRange),
             answerTokens: answer,
             rationale: "Fits your server\u{2019}s reported \(server)-token context window.")
     }
@@ -79,9 +109,12 @@ public enum TokenAdvisor {
         context + answer + 1000
     }
 
-    /// Rounds to the nearest `step` (so it lands on a stepper tick) and clamps.
-    private static func step(_ value: Int, min lo: Int, max hi: Int, step: Int) -> Int {
-        let rounded = Int((Double(value) / Double(step)).rounded()) * step
-        return Swift.max(lo, Swift.min(hi, rounded))
+    /// Seeds a first-run install before any model facts are known.
+    public static func firstRun() -> Recommendation {
+        recommendLocal(parameterBillions: nil, memory: nil)
+    }
+
+    private static func roundUp(_ value: Int, to step: Int) -> Int {
+        (value + step - 1) / step * step
     }
 }

@@ -16,8 +16,11 @@ public struct ContextBudget: Equatable, Sendable {
         case needsMoreBudget(neededTokens: Int)
         /// At least half the email budget stays empty.
         case mostlyUnused(percentUsed: Int)
-        /// The window's rough memory cost exceeds what's free for it.
-        case aboveMemory(estimatedGB: Double, availableGB: Double)
+        /// The model plus this window is estimated to exceed what the Mac lets
+        /// the GPU use; Ollama then moves part of the model to the CPU.
+        case aboveMemory(estimatedGB: Double, limitGB: Double)
+        /// The window is larger than the model was trained for.
+        case aboveModelWindow(maxTokens: Int)
         /// The window is larger than the local server reports it loaded.
         case aboveServerWindow(serverTokens: Int)
     }
@@ -28,13 +31,16 @@ public struct ContextBudget: Equatable, Sendable {
     public let answerTokens: Int
     /// Tokens the excerpts would take if none were dropped.
     public let emailNeededTokens: Int
-    /// Rough memory for the window; nil when no memory figure applies (cloud
-    /// providers, local servers).
-    public let estimatedMemoryGB: Double?
-    public let availableMemoryGB: Double?
+    /// Estimated memory for the model and this window; nil when the model's
+    /// architecture isn't known (cloud providers, local servers, unfamiliar
+    /// models) — no figure is better than a guessed one.
+    public let estimatedMemoryBytes: Double?
+    public let gpuLimitBytes: Int64?
     public let status: Status
 
     public var windowTokens: Int { promptTokens + emailUsedTokens + emailUnusedTokens + answerTokens }
+    public var estimatedMemoryGB: Double? { estimatedMemoryBytes.map(gigabytes) }
+    public var gpuLimitGB: Double? { gpuLimitBytes.map { gigabytes(Double($0)) } }
 
     /// Share of the email budget the excerpts fill, 0...100.
     public var emailUsedPercent: Int {
@@ -45,7 +51,7 @@ public struct ContextBudget: Equatable, Sendable {
     public init(excerpts: Int, contextTokens: Int, answerTokens: Int,
                 tokensPerExcerpt: Int = Defaults.fallbackTokensPerExcerpt,
                 promptTokens: Int = Defaults.promptScaffoldTokens,
-                availableMemoryGB: Double? = nil,
+                memory: ModelMemory? = nil,
                 serverWindowTokens: Int? = nil) {
         let needed = max(0, excerpts) * max(0, tokensPerExcerpt)
         let budget = max(0, contextTokens)
@@ -55,18 +61,22 @@ public struct ContextBudget: Equatable, Sendable {
         self.emailUnusedTokens = budget - used
         self.answerTokens = max(0, answerTokens)
         self.emailNeededTokens = needed
-        self.availableMemoryGB = availableMemoryGB
 
         let window = self.promptTokens + budget + self.answerTokens
-        let estimated = availableMemoryGB.map { _ in Double(window) / Double(Defaults.contextTokensPerGB) }
-        self.estimatedMemoryGB = estimated
+        let estimated = memory?.estimatedBytes(windowTokens: window)
+        self.estimatedMemoryBytes = estimated
+        self.gpuLimitBytes = memory?.gpuLimitBytes
 
-        // Most serious first: a window the machine or server can't hold beats
-        // a budget that is merely tight or loose.
+        // Most serious first: a window the server or the model can't take, or
+        // the Mac can't hold, beats a budget that is merely tight or loose.
         if let server = serverWindowTokens, server > 0, window > server {
             status = .aboveServerWindow(serverTokens: server)
-        } else if let estimated, let available = availableMemoryGB, estimated > available {
-            status = .aboveMemory(estimatedGB: estimated, availableGB: available)
+        } else if let maxTokens = memory?.architecture.maxContextTokens, window > maxTokens {
+            status = .aboveModelWindow(maxTokens: maxTokens)
+        } else if let memory, let estimated,
+                  estimated > Double(memory.gpuLimitBytes) * ModelMemory.warnFraction {
+            status = .aboveMemory(estimatedGB: gigabytes(estimated),
+                                  limitGB: gigabytes(Double(memory.gpuLimitBytes)))
         } else if needed > budget {
             status = .needsMoreBudget(neededTokens: needed)
         } else if budget > 0, used * 2 < budget {

@@ -52,9 +52,6 @@ public enum Defaults {
     public static let fallbackTokensPerExcerpt = 550
     /// Per-excerpt wrapper and header cost on top of the chunk text.
     public static let excerptOverheadTokens = 40
-    /// Rough rule of thumb behind the memory estimate: about one gigabyte of
-    /// KV cache per thousand tokens of window. Not measured for any model.
-    public static let contextTokensPerGB = 1000
     public static let temperature = 0.2
     public static let sessionTurnCap = 3
     /// How long a cloud primary gets before ProviderRouter starts racing

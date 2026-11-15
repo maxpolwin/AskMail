@@ -21,6 +21,9 @@ struct SettingsView: View {
     /// Sampled average chunk length of the index, for the budget panel's
     /// tokens-per-excerpt figure; nil until measured or when the index is empty.
     @State private var averageChunkChars: Int?
+    /// Architecture and size of the selected local chat model, for the budget
+    /// panel's memory gauge and recommendation; nil until Ollama answers.
+    @State private var modelInfo: OllamaModelInfo?
     @State private var statusMessage = ""
     @State private var launchAtLogin = LoginItem.isEnabled
     @State private var accounts: [MailAccount] = []
@@ -362,10 +365,7 @@ struct SettingsView: View {
                     answer: $settings.answerTokenLimit,
                     tokensPerExcerpt: ContextBudget.tokensPerExcerpt(averageChunkChars: averageChunkChars),
                     isMeasured: averageChunkChars != nil,
-                    availableMemoryGB: settings.provider == .ollamaLocal
-                        ? TokenAdvisor.availableMemoryGB(modelSizeMB: selectedLocalModelSizeMB,
-                                                         physicalMemoryBytes: ProcessInfo.processInfo.physicalMemory)
-                        : nil,
+                    memory: modelMemory,
                     serverWindowTokens: settings.provider == .localServer ? remote.contextLength : nil,
                     recommended: advice,
                     rationale: advice.rationale)
@@ -487,7 +487,9 @@ struct SettingsView: View {
             Task { await engine.refresh() }
             refreshRemoteModels()
             measureChunkSize()
+            refreshModelInfo()
         }
+        .onChange(of: settings.localChatModel) { _, _ in refreshModelInfo() }
         .onChange(of: settings.provider) { _, _ in
             refreshRemoteModels()
         }
@@ -665,27 +667,40 @@ struct SettingsView: View {
         }
     }
 
-    /// Recommended token budgets for the current provider, selected model, and
-    /// this Mac's memory. Recomputed on each render so it tracks provider/model
-    /// changes; ProcessInfo lookups are cheap.
+    /// Recommended budgets for the current provider and model. Recomputed on
+    /// each render so it tracks provider/model changes.
     private var tokenAdvice: TokenAdvisor.Recommendation {
-        if settings.provider == .localServer {
-            return TokenAdvisor.recommendLocalServer(serverContextTokens: remote.contextLength)
+        let perExcerpt = ContextBudget.tokensPerExcerpt(averageChunkChars: averageChunkChars)
+        switch settings.provider {
+        case .localServer:
+            return TokenAdvisor.recommendLocalServer(serverContextTokens: remote.contextLength,
+                                                     tokensPerExcerpt: perExcerpt)
+        case .ollamaLocal:
+            return TokenAdvisor.recommendLocal(parameterBillions: modelInfo?.parameterBillions,
+                                               memory: modelMemory, tokensPerExcerpt: perExcerpt)
+        case .ollamaCloud, .mistral:
+            return TokenAdvisor.recommendCloud(tokensPerExcerpt: perExcerpt)
         }
-        return TokenAdvisor.recommend(
-            isLocal: settings.provider == .ollamaLocal,
-            modelSizeMB: selectedLocalModelSizeMB,
-            physicalMemoryBytes: ProcessInfo.processInfo.physicalMemory)
     }
 
-    /// Size of the selected local chat model: the real installed size when
-    /// known, else the registry estimate, else a safe default.
-    private var selectedLocalModelSizeMB: Int {
-        if let installed = engine.installedModels.first(where: { $0.name == settings.localChatModel }),
-           installed.sizeBytes > 0 {
-            return Int(installed.sizeBytes / 1_000_000)
+    /// The selected local chat model's memory cost, when Ollama reported its
+    /// architecture; nil otherwise (cloud providers, unknown models), in which
+    /// case the panel shows no memory figure at all.
+    private var modelMemory: ModelMemory? {
+        guard settings.provider == .ollamaLocal, let architecture = modelInfo?.architecture,
+              let installed = engine.installedModels.first(where: { $0.name == settings.localChatModel }),
+              installed.sizeBytes > 0 else { return nil }
+        return ModelMemory(weightsBytes: installed.sizeBytes, architecture: architecture,
+                           gpuLimitBytes: GPUMemory.limitBytes)
+    }
+
+    /// Reads the selected local model's architecture and size from Ollama.
+    private func refreshModelInfo() {
+        let model = settings.localChatModel
+        Task {
+            let info = try? await OllamaControl().showModel(model)
+            if model == settings.localChatModel { modelInfo = info }
         }
-        return ModelCatalog.chat.first { $0.id == settings.localChatModel }?.approxSizeMB ?? 4700
     }
 
     /// Draft-Modus's background-activity line (DM-12 status surfacing):
