@@ -160,6 +160,10 @@ public enum Defaults {
     public static let noMatchMessage =
         "No matching emails found. Try different terms or a wider date range."
     public static let sourcesListLabel = "Sources"
+    /// Heading when the model cited nothing and the panel lists the emails it
+    /// was given instead (CitationRenderer.uncitedSources).
+    public static let uncitedSourcesListLabel = "Not cited by the model \u{2014} these emails were provided"
+    public static let uncitedSourcesShown = 5
 
     // MARK: Draft-Modus (docs/draft-contract.md)
     /// Messages kept per thread when assembling a draft (oldest dropped

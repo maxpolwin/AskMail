@@ -80,6 +80,18 @@ public enum CitationRenderer {
         return Rendered(text: text, sources: sources, droppedMarkers: dropped)
     }
 
+    /// What to list when an answer cites nothing although the model was given
+    /// emails: the best-ranked of them, numbered 1…n in rank order, so the
+    /// panel never shows an answer with no way back to its material. Empty
+    /// when the answer cites at least one source (the cited list is shown)
+    /// or there were no sources.
+    public static func uncitedSources(rendered: Rendered, sourceMap: [Int: SourceRef],
+                                      limit: Int = Defaults.uncitedSourcesShown) -> [(number: Int, ref: SourceRef)] {
+        guard rendered.sources.isEmpty else { return [] }
+        return sourceMap.keys.sorted().prefix(max(0, limit)).enumerated()
+            .map { (number: $0.offset + 1, ref: sourceMap[$0.element]!) }
+    }
+
     // MARK: Superscripts
 
     private static let superscriptDigits: [Character] = ["\u{2070}", "\u{00b9}", "\u{00b2}", "\u{00b3}", "\u{2074}", "\u{2075}", "\u{2076}", "\u{2077}", "\u{2078}", "\u{2079}"]

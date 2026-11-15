@@ -69,12 +69,20 @@ public struct PromptAssembler: Sendable {
         }
         bodyParts.append("CONTEXT:\n\(contextBlock)")
         bodyParts.append("QUESTION:\n\(question)")
+        // Repeated after the question (contract §5): small local models follow
+        // the end of the prompt far more than the system prompt, and without
+        // this rarely cite at all (docs/model-tuning.md §3).
+        bodyParts.append(Self.citationReminder)
 
         return AssembledPrompt(system: systemPrompt,
                                user: bodyParts.joined(separator: "\n\n"),
                                sourceMap: sourceMap,
                                chunksKept: budgeted.count)
     }
+
+    /// Fixed text, never user-supplied, so it adds no injection surface.
+    public static let citationReminder =
+        "Answer from CONTEXT only. Put the source number in square brackets, like [1], right after each fact it supports."
 
     // MARK: Context block (§3)
 

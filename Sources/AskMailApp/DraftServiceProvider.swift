@@ -114,7 +114,7 @@ final class DraftServiceProvider: NSObject {
     /// drafted at all.
     private static func generateOnDemandDetached(forSenderAddress email: String, preferredSelection: String? = nil) {
         let settings = SettingsStore.shared
-        let localChatModel = settings.localChatModel
+        let draftChat = settings.querySettings()
         let embedding = settings.embeddingConfig
         let accountEmail = settings.accountEmail
 
@@ -140,10 +140,12 @@ final class DraftServiceProvider: NSObject {
                 // Ollama directly rather than through a scheduled tick, so it
                 // needs its own guard against "daemon was quit since AskMail
                 // launched" instead of failing silently.
-                await OllamaEngine.shared.ensureRunning()
+                if !DraftChatFactory.usesLocalServer(draftChat.provider) || embedding.backend == .ollama {
+                    await OllamaEngine.shared.ensureRunning()
+                }
                 // Local-only regardless of the configured Q&A provider,
-                // matching every other Draft-Modus generation path (H-11).
-                let chatProvider = OllamaClient(host: Defaults.ollamaLocalHost, model: localChatModel)
+                // matching every other Draft-Modus generation path (H-25).
+                let chatProvider = DraftChatFactory.make(settings: draftChat)
                 let embedder = EmbedderFactory.make(embedding)
                 let record = try await DraftJobProcessor.regenerateDraft(
                     threadID: threadID, draftStore: draftStore, askStore: askStore,

@@ -30,11 +30,14 @@ selected one.
   always use the same one. An index survives a runtime switch only if a
   canary check (fixed probe strings, never mail text) shows the new embedder
   produces matching vectors; otherwise ingest refuses and a re-index is
-  required, so incompatible vectors are never mixed.
+  required, so incompatible vectors are never mixed. Ask repeats the check on
+  every question (the probes travel with the question to the same embedder)
+  and, on a mismatch, answers from keyword search only and says so.
 - Draft-Modus is local-only by construction: drafting, classification, and
-  style learning never use the configured cloud provider (its chat stays on
-  local Ollama; its embedder is the index's loopback-only embedder), and a draft is
-  never auto-sent or inserted into Mail.
+  style learning never use the configured cloud provider (its chat runs on
+  local Ollama, or on the loopback-only local server when Ask uses one; its
+  embedder is the index's loopback-only embedder), and a draft is never
+  auto-sent or inserted into Mail.
 - v1 has no PII redaction and no sender exclusion (both land in v1.1). This
   is an accepted, documented gap. Do not point v1 at a mailbox with highly
   sensitive correspondence.

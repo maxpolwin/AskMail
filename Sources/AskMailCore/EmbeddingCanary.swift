@@ -48,27 +48,37 @@ public enum EmbeddingCanary {
     public static func assess(store: SQLiteStore, embedder: EmbeddingProvider) async -> Assessment {
         do {
             guard try store.chunkCount() > 0 else { return .emptyIndex }
-            guard let stored = try store.meta(metaKey), let baseline = decode(stored) else {
-                return .noBaseline
-            }
-            let fresh = try await embedder.embed(texts)
-            guard fresh.count == texts.count else {
-                return .incompatible("the backend returned \(fresh.count) vectors for \(texts.count) probes")
-            }
-            guard fresh.allSatisfy({ $0.count == baseline.dimensions }) else {
-                return .incompatible(
-                    "vector width \(fresh.first?.count ?? 0) differs from the index\u{2019}s \(baseline.dimensions)")
-            }
-            var lowest: Float = 1
-            for (vector, reference) in zip(fresh, baseline.vectors) {
-                lowest = min(lowest, cosine(vector, reference))
-            }
-            return lowest >= threshold
-                ? .compatible(minSimilarity: lowest)
-                : .incompatible("the same probe text embeds differently (similarity \(String(format: "%.3f", lowest)) < \(threshold))")
+            guard let baseline = baseline(in: store) else { return .noBaseline }
+            return compare(try await embedder.embed(texts), with: baseline)
         } catch {
             return .unverifiable(error)
         }
+    }
+
+    /// The index's stored baseline; nil when there is none or it is malformed.
+    static func baseline(in store: SQLiteStore) -> Baseline? {
+        (try? store.meta(metaKey))?.flatMap(decode)
+    }
+
+    /// Verdict for freshly embedded probe vectors against `baseline`: either
+    /// `.compatible` or `.incompatible`. Shared by `assess` (indexing and
+    /// Settings) and the per-question check in `QueryService`, so both apply
+    /// the same threshold.
+    static func compare(_ fresh: [[Float]], with baseline: Baseline) -> Assessment {
+        guard fresh.count == texts.count else {
+            return .incompatible("the backend returned \(fresh.count) vectors for \(texts.count) probes")
+        }
+        guard fresh.allSatisfy({ $0.count == baseline.dimensions }) else {
+            return .incompatible(
+                "vector width \(fresh.first?.count ?? 0) differs from the index\u{2019}s \(baseline.dimensions)")
+        }
+        var lowest: Float = 1
+        for (vector, reference) in zip(fresh, baseline.vectors) {
+            lowest = min(lowest, cosine(vector, reference))
+        }
+        return lowest >= threshold
+            ? .compatible(minSimilarity: lowest)
+            : .incompatible("the same probe text embeds differently (similarity \(String(format: "%.3f", lowest)) < \(threshold))")
     }
 
     /// Stores `embedder`'s vectors for the probes as the index's baseline.

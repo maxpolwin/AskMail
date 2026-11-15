@@ -122,7 +122,11 @@ CONTEXT:
 
 QUESTION:
 {question}
+
+Answer from CONTEXT only. Put the source number in square brackets, like [1], right after each fact it supports.
 ```
+
+The last line is a fixed citation reminder (`PromptAssembler.citationReminder`), never user text. Small local models follow the end of the prompt much more than the system prompt; without the reminder `llama3.2:3b` cited in 0–25% of answers (docs/model-tuning.md §3).
 
 Do not split context into a separate system message; keeping it in the user turn keeps behaviour consistent across Ollama, Ollama Cloud, and Mistral, which weight system messages differently.
 
@@ -150,6 +154,10 @@ Implementation notes:
 - Do the `[N]` to superscript substitution on the completed answer, not mid-stream, to avoid partial-marker flicker while tokens arrive.
 - If the model emits a `[N]` with no matching source in the map (rare, malformed output), drop the marker silently rather than rendering a dead link, and log it.
 - UI copy is English-only in v1 (per A8); the list label is "Sources". Localization (e.g. German "Quellen") arrives with v1.1.
+
+**No citations at all.** If the answer contains no valid marker but the model was given sources, the panel lists the best-ranked of them (up to `Defaults.uncitedSourcesShown`, in rank order) under the heading "Not cited by the model — these emails were provided", with an icon so the difference doesn't rest on wording alone. The answer itself has no superscripts in that case. An answer that cites at least one source shows only its cited sources, as above.
+
+---
 
 ## 7. Empty-retrieval case
 

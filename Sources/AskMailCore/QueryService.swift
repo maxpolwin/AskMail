@@ -61,6 +61,11 @@ public struct QueryResult: Sendable {
     /// `N -> source email` for citation rendering; empty on the no-match path.
     public let sourceMap: [Int: SourceRef]
     public let events: AsyncThrowingStream<ChatEvent, Error>
+    /// Set when the embedder no longer matches the index (per-question
+    /// canary check): retrieval then used keyword search only, and the
+    /// panel says so. Nil when the vectors were used, or there was nothing
+    /// to compare against.
+    public var indexMismatch: String? = nil
 }
 
 /// Orchestrates one question: embed, hybrid search, RRF fusion, relevance
@@ -89,7 +94,7 @@ public final class QueryService: @unchecked Sendable {
 
     public func ask(_ question: String, settings: QuerySettings) async throws -> QueryResult {
         // 1. Retrieve.
-        let chunks = try await retrieve(question: question, settings: settings)
+        let (chunks, indexMismatch) = try await retrieveChecked(question: question, settings: settings)
 
         // 2. Empty-retrieval case (contract §7): never call the LLM with an
         //    empty context.
@@ -103,7 +108,7 @@ public final class QueryService: @unchecked Sendable {
                 continuation.yield(.done)
                 continuation.finish()
             }
-            return QueryResult(sourceMap: [:], events: events)
+            return QueryResult(sourceMap: [:], events: events, indexMismatch: indexMismatch)
         }
 
         // 3. Assemble per the prompt contract.
@@ -161,13 +166,45 @@ public final class QueryService: @unchecked Sendable {
             }
             continuation.onTermination = { _ in task.cancel() }
         }
-        return QueryResult(sourceMap: prompt.sourceMap, events: events)
+        return QueryResult(sourceMap: prompt.sourceMap, events: events, indexMismatch: indexMismatch)
     }
 
     // MARK: Retrieval (B6 steps 1-5)
 
     func retrieve(question: String, settings: QuerySettings) async throws -> [ContextChunk] {
-        let embedding = try await embedder.embed([question]).first ?? []
+        try await retrieveChecked(question: question, settings: settings).chunks
+    }
+
+    /// Embeds the question and, when the index has a canary baseline, the
+    /// canary probes in the same request — no extra round trip — so every
+    /// question proves the embedder still matches the index. That catches what
+    /// the Settings and indexing checks can't: a local server that loaded a
+    /// different model under the same name, a check that couldn't run, or
+    /// settings changed while the app was closed. On a mismatch the vector
+    /// search is skipped (its results would be unrelated mail) and keyword
+    /// search answers alone; the reason comes back for the panel to show.
+    /// A pre-canary index has no baseline and is used as before; the next
+    /// index update records one.
+    func embedQuestion(_ question: String) async throws -> (embedding: [Float], mismatch: String?) {
+        guard let baseline = EmbeddingCanary.baseline(in: store) else {
+            return (try await embedder.embed([question]).first ?? [], nil)
+        }
+        let vectors = try await embedder.embed([question] + EmbeddingCanary.texts)
+        guard let embedding = vectors.first else { return ([], nil) }
+        switch EmbeddingCanary.compare(Array(vectors.dropFirst()), with: baseline) {
+        case .compatible:
+            return (embedding, nil)
+        case .incompatible(let reason):
+            log("retrieval keyword-only: embedder no longer matches the index: \(reason)", .error)
+            return ([], reason)
+        default:
+            return ([], "unexpected canary result")
+        }
+    }
+
+    func retrieveChecked(question: String, settings: QuerySettings) async throws
+        -> (chunks: [ContextChunk], indexMismatch: String?) {
+        let (embedding, indexMismatch) = try await embedQuestion(question)
 
         // Rollup only, not a per-item dump: enumerating every dropped chunk's
         // identity would require an extra store round trip for information
@@ -234,7 +271,7 @@ public final class QueryService: @unchecked Sendable {
             }
             log("retrieval final[\(index + 1)] chunk=\(chunk.chunkID) subject=\"\(chunk.subject)\" from=\(chunk.sender) date=\(PromptAssembler.ymd(chunk.dateUnix)) score=\(String(format: "%.4f", chunk.score)) via=\(via)", .debug)
         }
-        return finalCandidates
+        return (finalCandidates, indexMismatch)
     }
 
     // MARK: Provider wiring (FR-4)

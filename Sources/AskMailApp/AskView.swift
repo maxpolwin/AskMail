@@ -227,6 +227,9 @@ final class AskViewModel: NSObject, ObservableObject {
     @Published var question = ""
     @Published var answer = ""
     @Published var sources: [(number: Int, ref: SourceRef)] = []
+    /// True when `sources` lists the emails the model was given because its
+    /// answer cited none (CitationRenderer.uncitedSources), not cited ones.
+    @Published var sourcesUncited = false
     @Published var warning: String?
     /// Hardening H-11: the cloud host named by a `.egress` event — the
     /// question + retrieved mail excerpts have left the device to that host,
@@ -291,6 +294,7 @@ final class AskViewModel: NSObject, ObservableObject {
         generation += 1
         answer = ""
         sources = []
+        sourcesUncited = false
         warning = nil
         egressHost = nil
         isStreaming = true
@@ -309,6 +313,10 @@ final class AskViewModel: NSObject, ObservableObject {
             do {
                 let service = try service()
                 let result = try await service.ask(text, settings: SettingsStore.shared.querySettings())
+                if gen == generation, result.indexMismatch != nil {
+                    warning = "Your embedding model no longer matches the index, so this answer uses keyword "
+                        + "search only. Rebuild the index in Settings \u{25B8} Models."
+                }
                 for try await event in result.events {
                     guard gen == generation else { return }  // superseded by a newer run
                     apply(event, raw: &raw)
@@ -321,7 +329,14 @@ final class AskViewModel: NSObject, ObservableObject {
                     RollingLog.shared.log("citation marker [\(dropped)] had no source; dropped", level: .debug)
                 }
                 answer = rendered.text
-                sources = rendered.sources
+                let uncited = CitationRenderer.uncitedSources(rendered: rendered, sourceMap: result.sourceMap)
+                if uncited.isEmpty {
+                    sources = rendered.sources
+                } else {
+                    RollingLog.shared.log("answer cited no sources; listing \(uncited.count) provided", level: .info)
+                    sources = uncited
+                    sourcesUncited = true
+                }
             } catch let error as ProviderError {
                 guard gen == generation else { return }  // don't surface a superseded run's error
                 answer = raw  // flush any tokens the throttle was still withholding
@@ -390,7 +405,7 @@ final class AskViewModel: NSObject, ObservableObject {
         var out = String(answerMarkdown(answer).characters)  // strip ** etc.
         if !sources.isEmpty {
             let pct = relevancePercents(sources)
-            out += "\n\n\(Defaults.sourcesListLabel)\n"
+            out += "\n\n\(sourcesUncited ? Defaults.uncitedSourcesListLabel : Defaults.sourcesListLabel)\n"
             out += sources.map { source in
                 var line = formatSource(source.number, source.ref)
                 // The exact relevance figure travels with the pasted text.
@@ -416,6 +431,7 @@ final class AskViewModel: NSObject, ObservableObject {
         question = ""
         answer = ""
         sources = []
+        sourcesUncited = false
         warning = nil
         egressHost = nil
         isStreaming = false
@@ -560,9 +576,16 @@ struct AskView: View {
     private var sourcesList: some View {
         VStack(alignment: .leading, spacing: 12) {
             Divider()
-            Text(Defaults.sourcesListLabel)
-                .font(.caption.weight(.semibold))
-                .foregroundStyle(.secondary)
+            if model.sourcesUncited {
+                // Icon + wording, not colour, carry the difference.
+                Label(Defaults.uncitedSourcesListLabel, systemImage: "quote.bubble")
+                    .font(.caption.weight(.semibold))
+                    .foregroundStyle(.secondary)
+            } else {
+                Text(Defaults.sourcesListLabel)
+                    .font(.caption.weight(.semibold))
+                    .foregroundStyle(.secondary)
+            }
             let pct = relevancePercents(model.sources)
             ForEach(model.sources, id: \.number) { source in
                 SourceRow(number: source.number, ref: source.ref,

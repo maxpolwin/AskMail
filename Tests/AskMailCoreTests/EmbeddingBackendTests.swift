@@ -211,6 +211,68 @@ final class EmbeddingBackendTests: XCTestCase {
         func embed(_ texts: [String]) async throws -> [[Float]] { throw error }
     }
 
+    /// Records every batch it is asked to embed, then embeds like `inner`.
+    private final class RecordingEmbedder: EmbeddingProvider, @unchecked Sendable {
+        let inner: EmbeddingProvider
+        private let lock = NSLock()
+        private var _batches: [[String]] = []
+        var batches: [[String]] { lock.withLock { _batches } }
+        init(_ inner: EmbeddingProvider) { self.inner = inner }
+        func embed(_ texts: [String]) async throws -> [[Float]] {
+            lock.withLock { _batches.append(texts) }
+            return try await inner.embed(texts)
+        }
+    }
+
+    // MARK: Per-question check (QueryService)
+
+    func testQuestionCarriesCanaryProbesInOneRequest() async throws {
+        let store = try await indexedStore()
+        let embedder = RecordingEmbedder(ScaledEmbedder())
+        let service = QueryService(store: store, embedder: embedder, log: { _, _ in })
+        let (chunks, mismatch) = try await service.retrieveChecked(question: "pricing webinar", settings: QuerySettings())
+        XCTAssertNil(mismatch, "same model through another runtime still matches")
+        XCTAssertFalse(chunks.isEmpty)
+        XCTAssertEqual(embedder.batches.count, 1, "no extra round trip for the check")
+        XCTAssertEqual(embedder.batches.first, ["pricing webinar"] + EmbeddingCanary.texts)
+    }
+
+    func testMismatchedEmbedderFallsBackToKeywordSearch() async throws {
+        let store = try await indexedStore()
+        let logged = Locked<[(String, RollingLog.LogLevel)]>([])
+        for embedder in [ShiftedEmbedder() as EmbeddingProvider, WideEmbedder()] {
+            let service = QueryService(store: store, embedder: embedder,
+                                       log: { line, level in logged.append((line, level)) })
+            let (chunks, mismatch) = try await service.retrieveChecked(question: "pricing webinar",
+                                                                       settings: QuerySettings())
+            XCTAssertNotNil(mismatch, "\(type(of: embedder)) must be flagged")
+            XCTAssertFalse(chunks.isEmpty, "keyword search still answers")
+        }
+        XCTAssertTrue(logged.current.contains { $0.0.contains("keyword-only") && $0.1 == .error })
+    }
+
+    func testMismatchIsReportedOnTheQueryResult() async throws {
+        let store = try await indexedStore()
+        let service = QueryService(store: store, embedder: ShiftedEmbedder(), log: { _, _ in })
+        var settings = QuerySettings()
+        settings.provider = .localServer
+        settings.localServerURL = "http://192.168.1.20:1234/v1"  // refused: no request is made
+        let result = try await service.ask("pricing webinar", settings: settings)
+        XCTAssertNotNil(result.indexMismatch)
+    }
+
+    func testPreCanaryIndexIsQueriedWithoutProbes() async throws {
+        let store = try SQLiteStore.inMemory()
+        let legacy = MailboxIngestor(store: store, embedder: StubEmbedder(), account: "test", log: { _, _ in })
+        _ = try await legacy.ingestNew(entries(["msg-0001-plain.emlx"]))
+        XCTAssertNil(try store.meta(EmbeddingCanary.metaKey))
+        let embedder = RecordingEmbedder(StubEmbedder())
+        let service = QueryService(store: store, embedder: embedder, log: { _, _ in })
+        let (_, mismatch) = try await service.retrieveChecked(question: "webinar", settings: QuerySettings())
+        XCTAssertNil(mismatch)
+        XCTAssertEqual(embedder.batches, [["webinar"]])
+    }
+
     /// A store with one ingested message and a baseline recorded by `StubEmbedder`.
     private func indexedStore() async throws -> SQLiteStore {
         let store = try SQLiteStore.inMemory()

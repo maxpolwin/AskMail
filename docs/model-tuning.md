@@ -94,6 +94,31 @@ Findings:
 - `qwen2.5:14b` was no better than the 7b on these measures and about twice as
   slow.
 
+## 4. A citation reminder at the end of the prompt fixes small-model citing
+
+Same 8 questions on `llama3.2:3b`, two runs each (32 answers per row), before
+and after adding one fixed line after the question
+(`PromptAssembler.citationReminder`, docs/prompt-contract.md §5). The rule in
+the system prompt was unchanged.
+
+| Prompt | Excerpts | Cited | Valid sources per answer | Answer length | Time |
+|---|---|---|---|---|---|
+| without reminder | 8 | 0% | 0.0 | 407 chars | 8 s |
+| | 13 | 0% | 0.0 | 425 chars | 13 s |
+| with reminder | 8 | 87% | 1.8 | 648 chars | 13 s |
+| | 13 | 93% | 3.1 | 1,110 chars | 32 s |
+
+- The reminder took the 3b model from rarely citing (0% here, 12-25% in §3)
+  to citing almost always, at the recommended 8 excerpts.
+- Answers got longer, which is most of the added time. At 13 excerpts one
+  answer ran on and emitted 23 markers for sources that don't exist; the panel
+  drops those silently. 8 excerpts stays the small-model recommendation.
+- Not re-measured on `qwen2.5:7b` or `14b` (they were removed after §3); they
+  already cited reliably without the reminder.
+- When an answer still cites nothing, the panel lists the emails the model was
+  given under "Not cited by the model", so no answer is left without a way back
+  to its material.
+
 ## What the app does with this
 
 - `TokenAdvisor.recommendLocal`: 8 excerpts for models under 4.5B parameters
@@ -104,6 +129,7 @@ Findings:
   (read from `/api/show`); otherwise no memory figure, never a guess.
 - A note appears for models under 4.5B parameters about citations and long
   prompts.
+- Every prompt ends with the citation reminder from §4.
 
 ## Limits of these measurements
 

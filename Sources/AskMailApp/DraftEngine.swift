@@ -88,7 +88,11 @@ final class DraftEngine: ObservableObject {
         // otherwise every embed/chat call below fails with "connection
         // refused" and the tick silently produces nothing. A no-op (a single
         // cheap reachability check) on the common case where it's already up.
-        await OllamaEngine.shared.ensureRunning()
+        // Skipped when neither drafting nor embeddings use Ollama.
+        let draftChat = settings.querySettings()
+        if !DraftChatFactory.usesLocalServer(draftChat.provider) || settings.embeddingConfig.backend == .ollama {
+            await OllamaEngine.shared.ensureRunning()
+        }
 
         // Snapshot the small bits of Settings state the detached work below
         // needs, on the main actor, before hopping off it. Perf fix (Task 3,
@@ -99,7 +103,6 @@ final class DraftEngine: ObservableObject {
         // themselves, but reading them only from the main actor keeps this
         // tick's inputs consistent with the guards just above.
         let embedding = settings.embeddingConfig
-        let localChatModel = settings.localChatModel
         let accountStorageKey = settings.accountStorageKey
         let accountEmail = settings.accountEmail
         let excludedSenders = settings.draftExcludedSenders
@@ -140,10 +143,10 @@ final class DraftEngine: ObservableObject {
                 }
 
                 // Local-only regardless of the user's configured Q&A provider
-                // (H-11 has no per-instance consent moment for an unattended
-                // background trigger — see docs/draft-contract.md and the
-                // Draft-Modus design plan).
-                let localLLM = OllamaClient(host: Defaults.ollamaLocalHost, model: localChatModel)
+                // (H-25: no per-instance consent moment for an unattended
+                // background trigger — see docs/draft-contract.md). Local
+                // Ollama, or the loopback-only local server when Ask uses one.
+                let localLLM = DraftChatFactory.make(settings: draftChat)
                 try await DraftJobProcessor.classifyPendingJobs(
                     draftStore: draftStore, askStore: askStore, parser: parser, fileIndex: fileIndex,
                     llmFallback: localLLM, accountEmail: accountEmail, excludedSenders: excludedSenders)
