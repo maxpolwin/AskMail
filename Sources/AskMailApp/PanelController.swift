@@ -8,6 +8,8 @@ import SwiftUI
 final class PanelController {
     private let panel: NSPanel
     private let viewModel = AskViewModel()
+    /// Frame size at creation; each open() snaps back to it after a manual resize.
+    private let defaultFrameSize: NSSize
 
     init() {
         // Tall, clear window: AskView floats a content-hugging card at the top,
@@ -20,10 +22,12 @@ final class PanelController {
         )
         panel.level = .floating
         // User-resizable: drag any edge to change the card's format. The size
-        // (but not position, which stays pinned top-center) persists across
-        // relaunches under this autosave name.
+        // is deliberately NOT persisted — every open() restores the default —
+        // so no frame autosave. Drop the value an earlier version stored, or
+        // nothing reads it but it would linger in the app's defaults.
         panel.minSize = NSSize(width: 420, height: 220)
-        panel.setFrameAutosaveName("AskPanel")
+        UserDefaults.standard.removeObject(forKey: "NSWindow Frame AskPanel")
+        defaultFrameSize = panel.frame.size
         panel.titleVisibility = .hidden
         panel.titlebarAppearsTransparent = true
         panel.isMovableByWindowBackground = true
@@ -54,6 +58,8 @@ final class PanelController {
 
     private func open() {
         viewModel.endSession()  // clean slate: every open starts empty (FR-3)
+        // Undo any manual resize from the last session before positioning.
+        panel.setFrame(NSRect(origin: panel.frame.origin, size: defaultFrameSize), display: false)
         positionTopCenter()
         panel.makeKeyAndOrderFront(nil)
         NSApp.activate(ignoringOtherApps: true)
