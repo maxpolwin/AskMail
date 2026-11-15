@@ -9,7 +9,7 @@ strings in a document.
 ## Models
 | Purpose | Default | Notes |
 |---|---|---|
-| Embedding | `nomic-embed-text` (768-dim) | local Ollama only, never cloud. ~274 MB. Set `num_ctx` to use full 8192 window. |
+| Embedding | `nomic-embed-text` (768-dim) | local Ollama or a loopback-only local server, never cloud. ~274 MB. Set `num_ctx` to use full 8192 window. |
 | Local chat | `qwen2.5:7b` or `llama3.1:8b` (Q4) | fits 24 GB with headroom. Benchmark both for latency vs quality on real queries. |
 | Ollama Cloud chat | `qwen3.5:cloud` (or current cloud model) | confirm available cloud model id at build time. |
 | Mistral chat | `mistral-large-latest` | confirm current model id and pricing before wiring. |
@@ -23,14 +23,16 @@ strings in a document.
 | Keyword top-N (pre-fusion) | 30 | from FTS5. |
 | Fusion | Reciprocal Rank Fusion (RRF) | |
 | RRF k constant | 60 | standard RRF default; tune if fusion favors one side. |
-| Final top-k (post-fusion) | 8 | user-configurable via context limit. |
+| Final top-k (post-fusion) | 8 | Settings "Excerpts per answer", 1–40. Recommended: 8 for models under 4.5B parameters, 13 otherwise (docs/model-tuning.md). |
 | Relevance floor | tune empirically | below this, return the no-match message (empty-retrieval case). |
 
 ## Generation
 | Parameter | Default | Notes |
 |---|---|---|
-| Context token limit | 4096 | user-configurable. Drop lowest-ranked chunks first if over. |
-| Answer token limit | 800 | user-configurable ("shorter/longer"). |
+| Context token limit | 5632 on first run | `TokenAdvisor.firstRun()`; 512–131,072, user-configurable, "Use recommended" re-derives it per model. Drop lowest-ranked chunks first if over. |
+| Answer token limit | 1000 on first run | 100–4000, user-configurable ("shorter/longer"). |
+| Citation reminder | on, fixed | last line of every prompt (docs/prompt-contract.md §5). |
+| Uncited sources shown | 5 | when an answer cites nothing, the best-ranked provided emails listed instead. |
 | Temperature | 0.2 | grounded factual answers, low creativity. |
 | Streaming | on | all providers. |
 | Session buffer cap | 3 most recent turns | protects token budget. |

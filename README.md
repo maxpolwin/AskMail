@@ -56,8 +56,10 @@ it from, so real ingestion needs the packaged app, not the bare binary.
 
 Runtime dependencies (not needed for tests): [Ollama](https://ollama.com)
 with `nomic-embed-text` pulled for embeddings and a local chat model
-(`qwen2.5:7b` default). Cloud providers are optional; keys go in the macOS
-Keychain via Settings, never in files.
+(`qwen2.5:7b` default). Instead of Ollama, a local OpenAI-compatible server
+on loopback (LM Studio, llama.cpp, MLX, vLLM, Jan) can serve chat and/or
+embeddings. Cloud providers are optional; keys go in the macOS Keychain via
+Settings, never in files.
 
 ## Implementation status
 
@@ -70,9 +72,20 @@ Done and under test:
 - RRF fusion, date-scoped query preprocessing (en/de month names)
 - Prompt assembly exactly per docs/prompt-contract.md, including per-email
   citation numbering and token budgeting
-- Citation post-processing: superscripts, source list, message:// links
-- Providers: Ollama local, Ollama Cloud, Mistral (all streaming), with
-  automatic local fallback and full-error-body logging (FR-4)
+- Citation post-processing: superscripts, source list, message:// links.
+  Every prompt ends with a fixed citation reminder (small local models
+  otherwise rarely cite, docs/model-tuning.md §4); an answer that still cites
+  nothing lists the emails the model was given, marked "Not cited by the model"
+- Providers: Ollama local, Ollama Cloud, Mistral, and a loopback-only local
+  OpenAI-compatible server (all streaming), with automatic local fallback for
+  the cloud providers and full-error-body logging (FR-4)
+- Embeddings from Ollama or the local server. A canary check (fixed probe
+  strings, never mail) lets the index survive a runtime switch when the
+  vectors match and forces a re-index when they don't; Ask repeats it on every
+  question and falls back to keyword search, with a warning, on a mismatch
+- Settings context-budget panel: excerpts per answer, email context and answer
+  tokens, drawn as one bar, with a memory gauge from the model's real
+  architecture and model-specific recommendations (docs/model-tuning.md)
 - Rolling 12 h in-memory debug log; Keychain-backed API keys
 - App shell: global hotkey, floating dark panel, settings window with
   manual vectorization, provider/limits/system-prompt editing, log copy
@@ -94,9 +107,10 @@ Done and under test:
   conversation; both verbs bypass every auto-draft eligibility rule
   (newsletter/no-reply classification, sender exclusion, the master toggle)
   when explicitly invoked, generating on demand if nothing was drafted yet —
-  never auto-inserted without that click. Local Ollama auto-starts itself
-  (app launch, every tick, every Services invocation) if it was quit
-  separately from AskMail.
+  never auto-inserted without that click. Drafts use local Ollama, or the
+  loopback-only local server when Ask uses one — never a cloud provider. Local
+  Ollama auto-starts itself (app launch, and every tick or Services invocation
+  that needs it) if it was quit separately from AskMail.
 - Egress control (hardening H-10/H-11): a compiled-in host allowlist in front
   of every outbound request, embeddings structurally loopback-only, a live
   "sent to <host>" indicator in the panel, and a per-session egress audit

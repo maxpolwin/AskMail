@@ -189,16 +189,17 @@ ACTUAL (what the person actually sent):
 Single-user-turn shape, same rationale as `docs/prompt-contract.md` §5 and
 `docs/draft-contract.md` §6: consistent behavior across chat providers that
 weight system messages differently. In practice this call is always issued
-against the local Ollama model (see §7) regardless of the user's configured
-Q&A/drafting provider.
+against a local runtime (see §7) regardless of the user's configured Q&A
+provider.
 
 ---
 
 ## 7. Local-only, on-device only
 
-Every `StyleLearner` LLM call uses the same local `OllamaClient` instance
-`DraftEngine` already builds for classification and drafting — never the
-user's configured cloud provider, matching Phase 2's established rule for
+Every `StyleLearner` LLM call uses the same chat provider `DraftEngine`
+already builds for classification and drafting (`DraftChatFactory.make`:
+local Ollama, or the loopback-only local server when Ask uses one) — never
+the user's configured cloud provider, matching Phase 2's established rule for
 Draft-Modus generally ("H-11 has no per-instance consent moment for an
 unattended background trigger"). `style_profiles.profile_text` is a distilled
 style summary, not verbatim mail content, but it is still derived from mail
